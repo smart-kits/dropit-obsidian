@@ -15,6 +15,19 @@
 - **不打扰。** 后台同步从不弹提示，只有手动同步才会显示结果。
 - **桌面和移动端都能用。** 无构建步骤，纯 CommonJS。
 
+## 让你的 AI 来装
+
+在用 AI 编程助手（Claude Code、Codex、Cursor……）？把下面这段贴给它：
+
+```text
+按照 https://raw.githubusercontent.com/smart-kits/dropit-obsidian/main/AGENTS.md
+帮我把 dropit 插件装进 Obsidian vault。先问我装进哪个 vault、创建账号之前也先问我；
+任何时候都不要显示或提交我的 token。
+```
+
+它会找到你的 vault、安装并启用插件，再告诉你配对时具体点哪里。
+给 AI 的说明在 [AGENTS.md](./AGENTS.md)。
+
 ## 安装
 
 还没有进入社区插件市场，请手动安装：

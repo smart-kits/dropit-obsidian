@@ -15,6 +15,19 @@ as notes, in real time. That's all it does: no sorting, no tagging, no rendering
 - **Quiet.** Background sync never interrupts you; notices only appear when you sync by hand.
 - **Desktop and mobile.** No build step, plain CommonJS.
 
+## Let your AI install it
+
+Using an AI coding agent (Claude Code, Codex, Cursor, …)? Paste this:
+
+```text
+Install the dropit plugin into my Obsidian vault by following
+https://raw.githubusercontent.com/smart-kits/dropit-obsidian/main/AGENTS.md
+Ask me which vault and before creating an account, and never show or commit my token.
+```
+
+The agent finds your vault, installs and enables the plugin, and tells you exactly what to
+click to pair it. Instructions for agents are in [AGENTS.md](./AGENTS.md).
+
 ## Install
 
 Not yet in the Community Plugins directory. Install it manually:
