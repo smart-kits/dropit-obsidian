@@ -1,0 +1,10 @@
+# dropit tokens use a custom format that GitHub secret scanning doesn't recognize,
+# so this repository blocks them itself.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "dropit-token"
+description = "dropit device token"
+regex = '''dk_[A-Za-z0-9_-]{43}'''
+tags = ["token", "dropit"]

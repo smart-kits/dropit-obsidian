@@ -1,0 +1,6 @@
+# Obsidian writes plugin settings — including the token in plain text — to data.json
+# in the plugin folder. When the plugin is symlinked into a vault for development,
+# that folder is this repository. It must never be committed.
+data.json
+**/data.json
+.DS_Store

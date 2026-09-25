@@ -1,0 +1,10 @@
+{
+  "id": "dropit",
+  "name": "dropit",
+  "version": "2.0.0",
+  "minAppVersion": "1.5.7",
+  "description": "Receive everything you send to dropit as notes in your vault, in real time.",
+  "author": "penuel",
+  "isDesktopOnly": false,
+  "authorUrl": "https://github.com/smart-kits"
+}

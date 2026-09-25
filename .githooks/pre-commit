@@ -1,0 +1,4 @@
+#!/bin/sh
+# Keep tokens out of this public repository. Enable with: git config core.hooksPath .githooks
+command -v gitleaks >/dev/null || { echo "pre-commit: gitleaks is not installed (brew install gitleaks)" >&2; exit 1; }
+exec gitleaks git --pre-commit --staged --redact --no-banner
