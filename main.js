@@ -7,7 +7,8 @@
  * Plain CommonJS, no build step.
  */
 
-const { Plugin, PluginSettingTab, Setting, Notice, normalizePath } = require('obsidian');
+const obsidian = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Notice, normalizePath } = obsidian;
 
 const DEFAULTS = {
   endpoint: 'https://dropit.realeye.top',
@@ -22,13 +23,111 @@ const HEARTBEAT_MS = 60_000;      // heartbeat every 60 s
 const STALE_MS = 150_000;         // silent for two heartbeats = dead connection
 const BACKOFF_MS = [1_000, 2_000, 5_000, 15_000, 30_000, 60_000];
 
-module.exports = class DropitPlugin extends Plugin {
+// ── Language ──────────────────────────────────────────────────────────
+// Follows Obsidian's interface language: Simplified Chinese for any Chinese setting, English otherwise.
+
+const STRINGS = {
+  en: {
+    errors: {                                  // keyed by the API error code
+      INVALID_TOKEN: 'Invalid token — pair again',
+      DEVICE_REVOKED: 'This device was removed — pair again',
+      SCOPE_INSUFFICIENT: 'This token can only send, not receive',
+      DEVICE_LIMIT_REACHED: 'Device limit reached — remove a device elsewhere first',
+      PAIRING_CODE_INVALID: 'Invalid pairing code',
+      PAIRING_CODE_EXPIRED: 'Pairing code expired — generate a new one',
+      RATE_LIMITED: 'Sending too fast',
+      QUOTA_EXCEEDED: 'Storage is full',
+    },
+    httpFailed: (status) => `Request failed: HTTP ${status}`,
+    ribbon: 'dropit: sync now',
+    command: 'Sync now',
+    received: (n) => `dropit: received ${n} item${n === 1 ? '' : 's'}`,
+    nothingNew: 'dropit: nothing new',
+    unnamedFile: 'untitled file',
+    missing: (kb, msg) => `⚠️ This ${kb} KB file couldn't be downloaded: ${msg}`,
+    missingWhere: 'The item is kept on the server for 30 days. You can get it from the web inbox or with `dropit watch`.',
+    missingRetry: 'To pull it again: reset the cursor in the plugin settings.',
+    serverAddress: 'Server address',
+    serverAddressDesc: 'No trailing slash',
+    setupTitle: 'Is this your first device?',
+    create: 'Yes, create a new account',
+    createDesc: 'Then generate pairing codes here to add your phone and browsers',
+    createButton: 'Create',
+    haveCode: 'No, I have a pairing code',
+    haveCodeDesc: 'Generate it on a device already using dropit — 6 characters, valid for 5 minutes',
+    join: 'Join',
+    folder: 'Folder',
+    folderDesc: 'Where items are written, relative to the vault',
+    pairingCode: 'Pairing code',
+    pairingCodeDesc: 'For a new device, valid for 5 minutes',
+    generate: 'Generate',
+    codeNotice: (code) => `Pairing code: ${code} (copied)`,
+    cursor: 'Cursor',
+    cursorDesc: (seq) => `Received up to seq ${seq}. Reset to pull every item still kept again.`,
+    reset: 'Reset',
+    unpair: 'Unpair',
+    unpairDesc: 'Clears this device\'s settings only — your items and devices stay',
+    unpairButton: 'Unpair',
+  },
+  zh: {
+    errors: {
+      INVALID_TOKEN: 'token 无效，请重新配对',
+      DEVICE_REVOKED: '设备已被移除，请重新配对',
+      SCOPE_INSUFFICIENT: '这个 token 只能投递，不能接收',
+      DEVICE_LIMIT_REACHED: '设备数已达上限，先在别处移除一台',
+      PAIRING_CODE_INVALID: '配对码无效',
+      PAIRING_CODE_EXPIRED: '配对码已过期，请重新生成',
+      RATE_LIMITED: '投递过于频繁',
+      QUOTA_EXCEEDED: '空间已满',
+    },
+    httpFailed: (status) => `请求失败 HTTP ${status}`,
+    ribbon: 'dropit：立即拉取',
+    command: '立即拉取',
+    received: (n) => `dropit：收到 ${n} 条`,
+    nothingNew: 'dropit：没有新内容',
+    unnamedFile: '未命名文件',
+    missing: (kb, msg) => `⚠️ 这是一个 ${kb} KB 的文件，没能下载下来：${msg}`,
+    missingWhere: '内容还在服务器上（保留 30 天）。到 Web 收件箱或用 `dropit watch` 可以拿到。',
+    missingRetry: '手动重拉：在插件设置里把游标重置。',
+    serverAddress: '服务地址',
+    serverAddressDesc: '不带尾斜杠',
+    setupTitle: '这是你的第一台设备吗？',
+    create: '是，创建新账号',
+    createDesc: '之后在这里生成配对码，把手机和浏览器加进来',
+    createButton: '创建',
+    haveCode: '否，我有配对码',
+    haveCodeDesc: '在已经用上 dropit 的设备上生成，6 位，5 分钟内有效',
+    join: '加入',
+    folder: '落地文件夹',
+    folderDesc: 'vault 内的相对路径',
+    pairingCode: '配对码',
+    pairingCodeDesc: '给新设备用，5 分钟内有效',
+    generate: '生成',
+    codeNotice: (code) => `配对码：${code}（已复制）`,
+    cursor: '游标',
+    cursorDesc: (seq) => `已收到 seq ${seq}。重置后重新拉取全部保留中的内容。`,
+    reset: '重置',
+    unpair: '解除配对',
+    unpairDesc: '只清空本机设置，不会删掉服务端的设备或内容',
+    unpairButton: '解除',
+  },
+};
+
+/** Obsidian >= 1.8 exposes getLanguage(); older versions keep the setting in localStorage. */
+function detectLang() {
+  let tag = 'en';
+  try { tag = obsidian.getLanguage?.() ?? globalThis.localStorage?.getItem('language') ?? 'en'; } catch { /* default */ }
+  return /^zh/i.test(tag) ? 'zh' : 'en';
+}
+const t = STRINGS[detectLang()];
+
+const DropitPlugin = class DropitPlugin extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
     this.retry = 0;
     this.addSettingTab(new DropitSettingTab(this.app, this));
-    this.addRibbonIcon('inbox', 'dropit：立即拉取', () => this.sync(true));
-    this.addCommand({ id: 'sync', name: '立即拉取', callback: () => this.sync(true) });
+    this.addRibbonIcon('inbox', t.ribbon, () => this.sync(true));
+    this.addCommand({ id: 'sync', name: t.command, callback: () => this.sync(true) });
 
     // The heartbeat is the only timer. After sleep/wake a socket often goes stale
     // while readyState still says OPEN.
@@ -57,10 +156,10 @@ module.exports = class DropitPlugin extends Plugin {
         await this.save();
         hasMore = page.has_more;
       }
-      if (verbose) new Notice(written ? `dropit：收到 ${written} 条` : 'dropit：没有新内容');
+      if (verbose) new Notice(written ? t.received(written) : t.nothingNew);
     } catch (err) {
       console.error('[dropit] sync', err);
-      if (verbose) new Notice(`dropit：${err.message}`);
+      if (verbose) new Notice(`dropit: ${err.message}`);
     } finally {
       this.syncing = false;
     }
@@ -176,7 +275,7 @@ module.exports = class DropitPlugin extends Plugin {
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok) return data;
-    const err = new Error(MESSAGES[data.error] ?? `请求失败 HTTP ${res.status}`);
+    const err = new Error(t.errors[data.error] ?? t.httpFailed(res.status));
     err.code = data.error;
     throw err;
   }
@@ -184,18 +283,6 @@ module.exports = class DropitPlugin extends Plugin {
   save() {
     return this.saveData(this.settings);
   }
-};
-
-/** Error messages shown to the user, keyed by the API error code */
-const MESSAGES = {
-  INVALID_TOKEN: 'token 无效，请重新配对',
-  DEVICE_REVOKED: '设备已被移除，请重新配对',
-  SCOPE_INSUFFICIENT: '这个 token 只能投递，不能接收',
-  DEVICE_LIMIT_REACHED: '设备数已达上限，先在别处移除一台',
-  PAIRING_CODE_INVALID: '配对码无效',
-  PAIRING_CODE_EXPIRED: '配对码已过期，请重新生成',
-  RATE_LIMITED: '投递过于频繁',
-  QUOTA_EXCEEDED: '队列已满',
 };
 
 function stamp(ms) {
@@ -225,13 +312,13 @@ function render(item) {
 
 /** Placeholder for a file that failed to download: what it is, why it failed, where else to get it. */
 function renderMissing(item, err) {
-  const name = item.meta?.filename ?? '未命名文件';
+  const name = item.meta?.filename ?? t.unnamedFile;
   return [
     ...frontmatter(item, [`filename: ${name}`, `bytes: ${item.bytes}`, 'download_failed: true']),
-    `⚠️ 这是一个 ${(item.bytes / 1024).toFixed(0)} KB 的文件，没能下载下来：${err.message}`,
+    t.missing((item.bytes / 1024).toFixed(0), err.message),
     '',
-    `内容还在服务器上（保留 30 天）。到 Web 收件箱或用 \`dropit watch\` 可以拿到。`,
-    '手动重拉：设置里把游标重置到这条之前。',
+    t.missingWhere,
+    t.missingRetry,
     '',
   ].join('\n');
 }
@@ -244,54 +331,54 @@ class DropitSettingTab extends PluginSettingTab {
 
   display() {
     this.containerEl.empty();
-    this.field('服务地址', '不带尾斜杠', 'endpoint');
+    this.field(t.serverAddress, t.serverAddressDesc, 'endpoint');
     this.plugin.settings.token ? this.paired() : this.setup();
   }
 
   /** Asked once; never shown again after pairing */
   setup() {
     const { containerEl } = this;
-    containerEl.createEl('h3', { text: '这是你的第一台设备吗？' });
+    containerEl.createEl('h3', { text: t.setupTitle });
 
     new Setting(containerEl)
-      .setName('是，创建新账号')
-      .setDesc('之后在这里生成配对码，把手机和浏览器加进来')
-      .addButton((b) => b.setButtonText('创建').setCta().onClick(() => this.run(() => this.plugin.createAccount())));
+      .setName(t.create)
+      .setDesc(t.createDesc)
+      .addButton((b) => b.setButtonText(t.createButton).setCta().onClick(() => this.run(() => this.plugin.createAccount())));
 
     let code = '';
     new Setting(containerEl)
-      .setName('否，我有配对码')
-      .setDesc('在已经用上 dropit 的设备上生成，6 位，5 分钟内有效')
+      .setName(t.haveCode)
+      .setDesc(t.haveCodeDesc)
       .addText((t) => t.setPlaceholder('K7M2QX').onChange((v) => { code = v; }))
-      .addButton((b) => b.setButtonText('加入').onClick(() => this.run(() => this.plugin.claimCode(code))));
+      .addButton((b) => b.setButtonText(t.join).onClick(() => this.run(() => this.plugin.claimCode(code))));
   }
 
   paired() {
     const { containerEl } = this;
-    this.field('落地文件夹', 'vault 内的相对路径', 'folder');
+    this.field(t.folder, t.folderDesc, 'folder');
 
     new Setting(containerEl)
-      .setName('配对码')
-      .setDesc('给新设备用，5 分钟内有效')
-      .addButton((b) => b.setButtonText('生成').onClick(() => this.run(async () => {
+      .setName(t.pairingCode)
+      .setDesc(t.pairingCodeDesc)
+      .addButton((b) => b.setButtonText(t.generate).onClick(() => this.run(async () => {
         const { code } = await this.plugin.api('POST', '/v1/pair');
-        new Notice(`配对码：${code}`, 300_000);
+        new Notice(t.codeNotice(code), 300_000);
         await navigator.clipboard.writeText(code).catch(() => {});
       }, false)));
 
     new Setting(containerEl)
-      .setName('游标')
-      .setDesc(`已收到 seq ${this.plugin.settings.cursor}。重置后重新拉取全部保留中的内容。`)
-      .addButton((b) => b.setButtonText('重置').setWarning().onClick(() => this.run(async () => {
+      .setName(t.cursor)
+      .setDesc(t.cursorDesc(this.plugin.settings.cursor))
+      .addButton((b) => b.setButtonText(t.reset).setWarning().onClick(() => this.run(async () => {
         this.plugin.settings.cursor = 0;
         await this.plugin.save();
         await this.plugin.sync(true);
       })));
 
     new Setting(containerEl)
-      .setName('解除配对')
-      .setDesc('只清空本机设置，不会删掉服务端的设备或内容')
-      .addButton((b) => b.setButtonText('解除').setWarning().onClick(() => this.run(async () => {
+      .setName(t.unpair)
+      .setDesc(t.unpairDesc)
+      .addButton((b) => b.setButtonText(t.unpairButton).setWarning().onClick(() => this.run(async () => {
         Object.assign(this.plugin.settings, { token: '', device_id: '', cursor: 0 });
         await this.plugin.save();
       })));
@@ -310,7 +397,10 @@ class DropitSettingTab extends PluginSettingTab {
       await fn();
       if (redraw) this.display();
     } catch (err) {
-      new Notice(`dropit：${err.message}`);
+      new Notice(`dropit: ${err.message}`);
     }
   }
 }
+
+module.exports = DropitPlugin;
+module.exports.STRINGS = STRINGS;            // for tests

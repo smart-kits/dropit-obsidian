@@ -43,12 +43,12 @@ Then: *Settings → Community plugins* → enable **dropit**.
 
 ## First run
 
-Open *Settings → dropit*. You'll be asked whether this is your first device (这是你的第一台设备吗？):
+Open *Settings → dropit*. You'll be asked *Is this your first device?*
 
-- **First device** → 是，创建新账号 (*Yes, create a new account*) → 创建
-- **Already using dropit** → 否，我有配对码 (*No, I have a pairing code*) → enter the 6-character code from another device → 加入 (*Join*)
+- **First device** → *Yes, create a new account* → *Create*
+- **Already using dropit** → *No, I have a pairing code* → enter the 6-character code from another device → *Join*
 
-To add more devices, generate a code under 配对码 (*Pairing code*) → 生成 (*Generate*).
+To add more devices, generate a code under *Pairing code → Generate*.
 It's copied to your clipboard and valid for 5 minutes.
 
 ## Where items go
@@ -74,13 +74,13 @@ created: 2026-09-25T08:00:00.000Z
 
 | Setting | What it does |
 |---|---|
-| 服务地址 · *Server address* | The dropit service address. Leave it unless told otherwise |
-| 落地文件夹 · *Folder* | Where items are written, relative to the vault (default `Inbox`) |
-| 配对码 · *Pairing code* | Generate a code for a new device |
-| 游标 · *Cursor* | Shows how far you've received. **Reset** pulls every item still kept (30 days) again; existing files are skipped |
-| 解除配对 · *Unpair* | Clears this device's settings. Your items and other devices are untouched |
+| Server address | The dropit service address. Leave it unless told otherwise |
+| Folder | Where items are written, relative to the vault (default `Inbox`) |
+| Pairing code | Generate a code for a new device |
+| Cursor | Shows how far you've received. **Reset** pulls every item still kept (30 days) again; existing files are skipped |
+| Unpair | Clears this device's settings. Your items and other devices are untouched |
 
-Sync by hand any time: the **inbox** icon in the ribbon, or the command **立即拉取** (*Sync now*).
+Sync by hand any time: the **inbox** icon in the ribbon, or the command **dropit: Sync now**.
 
 ## How it stays connected
 
@@ -92,9 +92,9 @@ Sync by hand any time: the **inbox** icon in the ribbon, or the command **立即
 
 | Notice | Meaning | What to do |
 |---|---|---|
-| `token 无效` / `设备已被移除` | The token is invalid or this device was revoked | Unpair, then join again with a new code |
-| `设备数已达上限` | Device limit reached | Revoke an unused device from another device (`dropit revoke <id>`) |
-| `请求失败 HTTP …` or a network error | The service couldn't be reached | Check your connection and the server address |
+| `Invalid token` / `This device was removed` | The token is invalid or this device was revoked | Unpair, then join again with a new code |
+| `Device limit reached` | Device limit reached | Revoke an unused device from another device (`dropit revoke <id>`) |
+| `Request failed: HTTP …` or a network error | The service couldn't be reached | Check your connection and the server address |
 
 Background failures are only logged to the developer console (`[dropit]`).
 
@@ -116,7 +116,7 @@ Commit messages are in English. Docs come in pairs — please update both `READM
 ## Limitations
 
 - Receive-only. To send, use the [CLI, browser extension or iOS Shortcuts](https://github.com/smart-kits/dropit-client).
-- The interface is Chinese only for now.
+- The interface follows your language: English by default, Simplified Chinese when your Obsidian is set to Chinese.
 
 ## License
 

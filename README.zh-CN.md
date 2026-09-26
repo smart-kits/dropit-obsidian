@@ -79,7 +79,7 @@ created: 2026-09-25T08:00:00.000Z
 | 游标 | 显示已经收到哪一条。**重置**会把仍在保留期（30 天）内的内容全部重新拉一遍，已存在的文件会跳过 |
 | 解除配对 | 清空这台设备上的设置。你的内容和其他设备都不受影响 |
 
-随时可以手动同步：点侧栏的**收件箱**图标，或者运行命令「立即拉取」。
+随时可以手动同步：点侧栏的**收件箱**图标，或者运行命令「dropit: 立即拉取」。
 
 ## 怎么保持连接
 
@@ -115,7 +115,7 @@ brew install gitleaks && git config core.hooksPath .githooks   # 防止 token �
 ## 已知限制
 
 - 只收不投。投递请用[命令行、浏览器扩展或 iOS 快捷指令](https://github.com/smart-kits/dropit-client/blob/main/README.zh-CN.md)。
-- 界面目前只有中文。
+- 界面语言跟随 Obsidian：默认英文，Obsidian 设为中文时显示简体中文。
 
 ## 许可
 

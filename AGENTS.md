@@ -53,19 +53,20 @@ as `["dropit"]` if it doesn't exist. This does nothing if Restricted mode is on.
 
 ### 4 · Pair — 👤 user
 
-*Settings → dropit* asks whether this is the first device (这是你的第一台设备吗？):
+*Settings → dropit* asks *Is this your first device?*
 
-- First device → 是，创建新账号 → 创建
-- Otherwise → 否，我有配对码 → enter the code → 加入
+- First device → *Yes, create a new account* → *Create*
+- Otherwise → *No, I have a pairing code* → enter the code → *Join*
 
-The interface text is Chinese for now.
+The plugin follows Obsidian's language. If the user's Obsidian is set to Chinese, the buttons are in
+Chinese — [README.zh-CN.md](./README.zh-CN.md) names them.
 
 ### 5 · Verify
 
-- The dropit settings page now shows 落地文件夹 (folder, default `Inbox`) and 游标 (cursor).
+- The dropit settings page now shows *Folder* (default `Inbox`) and *Cursor*.
 - Send a test item from another device — e.g. `dropit send "hello from the CLI"` — and check that
   `Inbox/YYYY-MM-DD-<seq>.md` appears within a few seconds (or after the ribbon's **inbox** icon
-  / the command 立即拉取 if real-time push isn't available).
+  / the command *dropit: Sync now* if real-time push isn't available).
 
 ### 6 · Warn about vault sync
 
@@ -75,7 +76,7 @@ offer to add that path to the vault's `.gitignore`.
 
 ### Uninstall
 
-👤 *Settings → dropit → 解除配对* (unpair), disable the plugin, then
+👤 *Settings → dropit → Unpair*, disable the plugin, then
 `rm -rf "$VAULT/.obsidian/plugins/dropit"`. To revoke the device itself, run `dropit devices`
 and `dropit revoke <device_id>` from a CLI with a full token.
 
@@ -83,9 +84,9 @@ and `dropit revoke <device_id>` from a CLI with a full token.
 
 | Notice | Meaning | Fix |
 |---|---|---|
-| `token 无效` · `设备已被移除` | Token invalid or device revoked | 👤 Unpair, then join with a fresh code |
-| `配对码无效` · `配对码已过期` | Wrong or expired code | Get a fresh code (valid 5 min) |
-| `设备数已达上限` | Device limit reached | `dropit revoke <id>` an unused device |
+| `Invalid token` · `This device was removed` | Token invalid or device revoked | 👤 Unpair, then join with a fresh code |
+| `Invalid pairing code` · `Pairing code expired` | Wrong or expired code | Get a fresh code (valid 5 min) |
+| `Device limit reached` | Device limit reached | `dropit revoke <id>` an unused device |
 | Nothing arrives | Plugin disabled, or not paired | Check steps 3–4; details are in the developer console under `[dropit]` |
 
 ---
@@ -96,6 +97,7 @@ and `dropit revoke <device_id>` from a CLI with a full token.
   When the plugin is symlinked into a vault for development, Obsidian writes `data.json`
   **into this repository** — it is gitignored and the hook blocks tokens, keep both in place.
 - **Tests:** `node test.cjs` (no dependencies). Run it after every change.
+- **Interface text is bilingual:** every string lives in `STRINGS.en` and `STRINGS.zh` in `main.js`. Add both — the test checks the keys match.
 - **Commit messages in English.**
 - **Docs come in pairs:** `README.md` (English) and `README.zh-CN.md`. Change both.
 - **No backend details** in docs or comments — the plugin talks to the API; that's all it needs to know.
