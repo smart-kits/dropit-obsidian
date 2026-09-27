@@ -11,7 +11,7 @@ const obsidian = require('obsidian');
 const { Plugin, PluginSettingTab, Setting, Notice, normalizePath } = obsidian;
 
 const DEFAULTS = {
-  endpoint: 'https://dropit.realeye.top',
+  endpoint: 'https://dropit.smart-kits.xyz',
   token: '',
   folder: 'Inbox',
   cursor: 0,          // the local cursor is the source of truth
