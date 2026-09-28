@@ -45,7 +45,7 @@ const STRINGS = {
     nothingNew: 'dropit: nothing new',
     unnamedFile: 'untitled file',
     missing: (kb, msg) => `⚠️ This ${kb} KB file couldn't be downloaded: ${msg}`,
-    missingWhere: 'The item is kept on the server for 30 days. You can get it from the web inbox or with `dropit watch`.',
+    missingWhere: 'The item is kept on the server for 14 days (30 on paid plans). You can get it from the web inbox or with `dropit watch`.',
     missingRetry: 'To fetch it again: Settings → dropit → Pull again.',
     noRealtime: 'dropit: real-time push isn\'t in your plan (new accounts get it for 14 days). '
       + 'New items now arrive when Obsidian opens, or when you sync by hand.',
@@ -94,7 +94,7 @@ const STRINGS = {
     nothingNew: 'dropit：没有新内容',
     unnamedFile: '未命名文件',
     missing: (kb, msg) => `⚠️ 这是一个 ${kb} KB 的文件，没能下载下来：${msg}`,
-    missingWhere: '内容还在服务器上（保留 30 天）。到 Web 收件箱或用 `dropit watch` 可以拿到。',
+    missingWhere: '内容还在服务器上（保留 14 天，付费版 30 天）。到 Web 收件箱或用 `dropit watch` 可以拿到。',
     missingRetry: '重新拉取：设置 → dropit → 重新拉取。',
     noRealtime: 'dropit：当前套餐不含实时推送（新账号有 14 天体验期）。新内容改为在打开 Obsidian 时、或手动同步时拉取。',
     serverAddress: '服务地址',
