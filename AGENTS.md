@@ -53,10 +53,10 @@ as `["dropit"]` if it doesn't exist. This does nothing if Restricted mode is on.
 
 ### 4 · Pair — 👤 user
 
-*Settings → dropit* asks *Is this your first device?*
+*Settings → dropit* opens on *Join with a pairing code*:
 
-- First device → *Yes, create a new account* → *Create*
-- Otherwise → *No, I have a pairing code* → enter the code → *Join*
+- Already using dropit → enter the code under *Pairing code* → *Join*
+- First device → *First time using dropit?* → *Create a new account*
 
 The plugin follows Obsidian's language. If the user's Obsidian is set to Chinese, the buttons are in
 Chinese — [README.zh-CN.md](./README.zh-CN.md) names them.

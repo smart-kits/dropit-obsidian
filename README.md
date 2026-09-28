@@ -43,10 +43,10 @@ Then: *Settings → Community plugins* → enable **dropit**.
 
 ## First run
 
-Open *Settings → dropit*. You'll be asked *Is this your first device?*
+Open *Settings → dropit*. It opens on *Join with a pairing code*:
 
-- **First device** → *Yes, create a new account* → *Create*
-- **Already using dropit** → *No, I have a pairing code* → enter the 6-character code from another device → *Join*
+- **Already using dropit** → enter the 6-character code from another device under *Pairing code* → *Join*
+- **First device** → *First time using dropit?* → *Create a new account*
 
 To add more devices, generate a code under *Pairing code → Generate*.
 It's copied to your clipboard and valid for 5 minutes.

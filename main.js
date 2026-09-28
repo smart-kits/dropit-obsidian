@@ -49,12 +49,12 @@ const STRINGS = {
     missingRetry: 'To pull it again: reset the cursor in the plugin settings.',
     serverAddress: 'Server address',
     serverAddressDesc: 'No trailing slash',
-    setupTitle: 'Is this your first device?',
-    create: 'Yes, create a new account',
-    createDesc: 'Then generate pairing codes here to add your phone and browsers',
-    createButton: 'Create',
-    haveCode: 'No, I have a pairing code',
-    haveCodeDesc: 'Generate it on a device already using dropit — 6 characters, valid for 5 minutes',
+    setupTitle: 'Join with a pairing code',
+    create: 'First time using dropit?',
+    createDesc: 'Create a new account on this device, then generate pairing codes here to add your phone and browsers',
+    createButton: 'Create a new account',
+    haveCode: 'Pairing code',
+    haveCodeDesc: 'Generate it in a dropit client you already use — 6 characters, valid for 5 minutes',
     join: 'Join',
     folder: 'Folder',
     folderDesc: 'Where items are written, relative to the vault',
@@ -91,12 +91,12 @@ const STRINGS = {
     missingRetry: '手动重拉：在插件设置里把游标重置。',
     serverAddress: '服务地址',
     serverAddressDesc: '不带尾斜杠',
-    setupTitle: '这是你的第一台设备吗？',
-    create: '是，创建新账号',
-    createDesc: '之后在这里生成配对码，把手机和浏览器加进来',
-    createButton: '创建',
-    haveCode: '否，我有配对码',
-    haveCodeDesc: '在已经用上 dropit 的设备上生成，6 位，5 分钟内有效',
+    setupTitle: '用配对码加入',
+    create: '第一次用 dropit？',
+    createDesc: '在这台设备上创建新账号，之后在这里生成配对码，把手机和浏览器加进来',
+    createButton: '创建新账号',
+    haveCode: '配对码',
+    haveCodeDesc: '在你已经在用的 dropit 客户端里生成，6 位，5 分钟内有效',
     join: '加入',
     folder: '落地文件夹',
     folderDesc: 'vault 内的相对路径',
@@ -335,22 +335,25 @@ class DropitSettingTab extends PluginSettingTab {
     this.plugin.settings.token ? this.paired() : this.setup();
   }
 
-  /** Asked once; never shown again after pairing */
+  /**
+   * Asked once; never shown again after pairing. Joining comes first and is the call to action:
+   * creating an account by mistake splits someone's items across two accounts.
+   */
   setup() {
     const { containerEl } = this;
     containerEl.createEl('h3', { text: t.setupTitle });
-
-    new Setting(containerEl)
-      .setName(t.create)
-      .setDesc(t.createDesc)
-      .addButton((b) => b.setButtonText(t.createButton).setCta().onClick(() => this.run(() => this.plugin.createAccount())));
 
     let code = '';
     new Setting(containerEl)
       .setName(t.haveCode)
       .setDesc(t.haveCodeDesc)
       .addText((t) => t.setPlaceholder('K7M2QX').onChange((v) => { code = v; }))
-      .addButton((b) => b.setButtonText(t.join).onClick(() => this.run(() => this.plugin.claimCode(code))));
+      .addButton((b) => b.setButtonText(t.join).setCta().onClick(() => this.run(() => this.plugin.claimCode(code))));
+
+    new Setting(containerEl)
+      .setName(t.create)
+      .setDesc(t.createDesc)
+      .addButton((b) => b.setButtonText(t.createButton).onClick(() => this.run(() => this.plugin.createAccount())));
   }
 
   paired() {
