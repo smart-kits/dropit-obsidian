@@ -46,7 +46,9 @@ const STRINGS = {
     unnamedFile: 'untitled file',
     missing: (kb, msg) => `⚠️ This ${kb} KB file couldn't be downloaded: ${msg}`,
     missingWhere: 'The item is kept on the server for 30 days. You can get it from the web inbox or with `dropit watch`.',
-    missingRetry: 'To pull it again: reset the cursor in the plugin settings.',
+    missingRetry: 'To fetch it again: Settings → dropit → Pull again.',
+    noRealtime: 'dropit: real-time push isn\'t in your plan (new accounts get it for 14 days). '
+      + 'New items now arrive when Obsidian opens, or when you sync by hand.',
     serverAddress: 'Server address',
     serverAddressDesc: 'No trailing slash',
     setupTitle: 'Join with a pairing code',
@@ -62,9 +64,14 @@ const STRINGS = {
     pairingCodeDesc: 'For a new device, valid for 5 minutes',
     generate: 'Generate',
     codeNotice: (code) => `Pairing code: ${code} (copied)`,
-    cursor: 'Cursor',
-    cursorDesc: (seq) => `Received up to seq ${seq}. Reset to pull every item still kept again.`,
-    reset: 'Reset',
+    repull: 'Pull again',
+    repullDesc: (seq) => `Received up to #${seq}. Notes already in the vault are kept; failed downloads are tried again.`,
+    repullAll: 'Everything',
+    repullSeq: 'From item #N',
+    repullDays: 'The last N days',
+    repullDaysUnit: 'days',
+    repullGo: 'Pull',
+    repullNumber: 'Enter a positive number',
     unpair: 'Unpair',
     unpairDesc: 'Clears this device\'s settings only — your items and devices stay',
     unpairButton: 'Unpair',
@@ -88,7 +95,8 @@ const STRINGS = {
     unnamedFile: '未命名文件',
     missing: (kb, msg) => `⚠️ 这是一个 ${kb} KB 的文件，没能下载下来：${msg}`,
     missingWhere: '内容还在服务器上（保留 30 天）。到 Web 收件箱或用 `dropit watch` 可以拿到。',
-    missingRetry: '手动重拉：在插件设置里把游标重置。',
+    missingRetry: '重新拉取：设置 → dropit → 重新拉取。',
+    noRealtime: 'dropit：当前套餐不含实时推送（新账号有 14 天体验期）。新内容改为在打开 Obsidian 时、或手动同步时拉取。',
     serverAddress: '服务地址',
     serverAddressDesc: '不带尾斜杠',
     setupTitle: '用配对码加入',
@@ -104,9 +112,14 @@ const STRINGS = {
     pairingCodeDesc: '给新设备用，5 分钟内有效',
     generate: '生成',
     codeNotice: (code) => `配对码：${code}（已复制）`,
-    cursor: '游标',
-    cursorDesc: (seq) => `已收到 seq ${seq}。重置后重新拉取全部保留中的内容。`,
-    reset: '重置',
+    repull: '重新拉取',
+    repullDesc: (seq) => `已收到 #${seq}。vault 里已有的笔记不会重复写；之前下载失败的会重新下载。`,
+    repullAll: '全部',
+    repullSeq: '从第 N 条起',
+    repullDays: '最近 N 天',
+    repullDaysUnit: '天',
+    repullGo: '拉取',
+    repullNumber: '请填一个正整数',
     unpair: '解除配对',
     unpairDesc: '只清空本机设置，不会删掉服务端的设备或内容',
     unpairButton: '解除',
@@ -132,7 +145,13 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     // The heartbeat is the only timer. After sleep/wake a socket often goes stale
     // while readyState still says OPEN.
     this.registerInterval(window.setInterval(() => this.heartbeat(), HEARTBEAT_MS));
-    this.register(() => this.socket?.close());
+    // Closing the socket fires onclose, which schedules a reconnect: without the flag and the cleared
+    // timer, a disabled plugin kept reconnecting and writing notes, and each reload leaked a connection.
+    this.register(() => {
+      this.unloaded = true;
+      window.clearTimeout(this.reconnectTimer);
+      this.socket?.close();
+    });
 
     if (this.settings.token) {
       await this.sync(false);      // catch up first, then go real-time
@@ -149,7 +168,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     try {
       let written = 0;
       for (let hasMore = true; hasMore; ) {
-        const page = await this.api('GET', `/v1/pull?after=${this.settings.cursor}&limit=${PAGE}`);
+        const since = this.since ? `&since=${this.since}` : '';
+        const page = await this.api('GET', `/v1/pull?after=${this.settings.cursor}&limit=${PAGE}${since}`);
         for (const item of page.items) written += (await this.write(item)) ? 1 : 0;
         // advance the cursor only after writing — a duplicate beats a lost item
         this.settings.cursor = page.next_after;
@@ -157,6 +177,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
         hasMore = page.has_more;
       }
       if (verbose) new Notice(written ? t.received(written) : t.nothingNew);
+      // Syncing by hand is also when real-time gets another try — e.g. right after upgrading.
+      if (verbose && this.noRealtime) { this.noRealtime = false; this.connect(); }
     } catch (err) {
       console.error('[dropit] sync', err);
       if (verbose) new Notice(`dropit: ${err.message}`);
@@ -186,13 +208,18 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     const name = `${stamp(item.created_at)}-${item.seq}-${sanitize(item.meta?.filename ?? 'file')}`;
     const path = normalizePath(`${folder}/${name}`);
     const fallback = normalizePath(`${folder}/${stamp(item.created_at)}-${item.seq}.md`);
-    if (this.app.vault.getFileByPath(path) || this.app.vault.getFileByPath(fallback)) return false;
+    if (this.app.vault.getFileByPath(path)) return false;
+    // A note from an earlier failed download doesn't count as done: pulling again (settings → Pull again)
+    // tries the file once more and swaps the note for it.
+    const note = this.app.vault.getFileByPath(fallback);
     try {
       const res = await fetch(item.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await this.app.vault.createBinary(path, await res.arrayBuffer());
+      if (note) await this.app.vault.delete(note);
     } catch (err) {
       console.error('[dropit] download failed', item.seq, err);
+      if (note) return false;
       await this.app.vault.create(fallback, renderMissing(item, err));
     }
     return true;
@@ -201,9 +228,10 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   // ── Real-time ─────────────────────────────────────────────────────────
 
   async connect() {
-    if (this.socket || !this.settings.token) return;
+    if (this.socket || !this.settings.token || this.unloaded || this.noRealtime) return;
     try {
       const { ticket } = await this.api('POST', '/v1/ws/ticket');
+      if (this.unloaded) return;
       const url = new URL(this.base() + '/v1/ws');
       url.protocol = url.protocol.replace('http', 'ws');
       url.searchParams.set('ticket', ticket);
@@ -218,8 +246,17 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       socket.onclose = () => { this.socket = null; this.scheduleReconnect(); };
       socket.onerror = () => socket.close();
     } catch (err) {
-      // 403 WS_REQUIRES_PAID: real-time isn't included — don't retry, don't complain
-      if (err.code === 'WS_REQUIRES_PAID') return;
+      // 403 WS_REQUIRES_PAID: real-time isn't included. Stop asking — every heartbeat used to ask
+      // again, forever — and say once what happens instead. A manual sync or a restart tries again.
+      if (err.code === 'WS_REQUIRES_PAID') {
+        this.noRealtime = true;
+        if (!this.settings.noRealtimeNoticed) {
+          new Notice(t.noRealtime, 15_000);
+          this.settings.noRealtimeNoticed = true;
+          await this.save();
+        }
+        return;
+      }
       console.error('[dropit] ws', err);
       this.scheduleReconnect();
     }
@@ -227,15 +264,31 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   /** Exponential backoff, capped at 60 s */
   scheduleReconnect() {
+    if (this.unloaded || this.noRealtime) return;
     const delay = BACKOFF_MS[Math.min(this.retry++, BACKOFF_MS.length - 1)];
-    window.setTimeout(() => this.connect(), delay);
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
   }
 
   heartbeat() {
-    if (!this.settings.token) return;
+    if (!this.settings.token || this.noRealtime) return;
     if (!this.socket) return void this.connect();
     if (Date.now() - this.lastBeat > STALE_MS) return void this.socket.close();  // stale — reconnect
     try { this.socket.send('ping'); } catch { this.socket.close(); }
+  }
+
+  /**
+   * Pull again from a point: everything, from item #n, or the last n days. Notes already in the vault
+   * are kept (write() skips them), so this fills in what's missing and retries failed downloads.
+   * The server's snapshot of this device's position only moves forward on its own, so it's reset too.
+   */
+  async repull(mode, n) {
+    if (mode !== 'all' && !(Number.isInteger(n) && n >= 1)) throw new Error(t.repullNumber);
+    this.settings.cursor = mode === 'seq' ? n - 1 : 0;
+    await this.save();
+    await this.api('POST', '/v1/cursor/reset', { to_seq: this.settings.cursor }).catch(() => {});
+    this.since = mode === 'days' ? Date.now() - n * 86_400_000 : 0;
+    try { await this.sync(true); } finally { this.since = 0; }
   }
 
   // ── First run: create an account or join with a pairing code ──────────
@@ -369,14 +422,27 @@ class DropitSettingTab extends PluginSettingTab {
         await navigator.clipboard.writeText(code).catch(() => {});
       }, false)));
 
+    let mode = 'all';
+    let n = '';
+    let number;
     new Setting(containerEl)
-      .setName(t.cursor)
-      .setDesc(t.cursorDesc(this.plugin.settings.cursor))
-      .addButton((b) => b.setButtonText(t.reset).setWarning().onClick(() => this.run(async () => {
-        this.plugin.settings.cursor = 0;
-        await this.plugin.save();
-        await this.plugin.sync(true);
-      })));
+      .setName(t.repull)
+      .setDesc(t.repullDesc(this.plugin.settings.cursor))
+      .addDropdown((d) => d.addOptions({ all: t.repullAll, seq: t.repullSeq, days: t.repullDays }).onChange((v) => {
+        mode = v;
+        number.inputEl.style.display = v === 'all' ? 'none' : '';
+        number.setPlaceholder(v === 'seq' ? '#' : t.repullDaysUnit);
+        if (v === 'days' && !n) { n = '7'; number.setValue(n); }
+      }))
+      .addText((x) => {
+        number = x;
+        x.inputEl.type = 'number';
+        x.inputEl.min = '1';
+        x.inputEl.style.width = '7em';
+        x.inputEl.style.display = 'none';
+        x.onChange((v) => { n = v; });
+      })
+      .addButton((b) => b.setButtonText(t.repullGo).onClick(() => this.run(() => this.plugin.repull(mode, Number(n)))));
 
     new Setting(containerEl)
       .setName(t.unpair)

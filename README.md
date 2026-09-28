@@ -77,7 +77,7 @@ created: 2026-09-25T08:00:00.000Z
 | Server address | The dropit service address. Leave it unless told otherwise |
 | Folder | Where items are written, relative to the vault (default `Inbox`) |
 | Pairing code | Generate a code for a new device |
-| Cursor | Shows how far you've received. **Reset** pulls every item still kept (30 days) again; existing files are skipped |
+| Pull again | Shows how far you've received, and pulls again from a point: **everything**, **from item #N**, or **the last N days**. Notes already in the vault are kept; a file whose download failed earlier is tried again and replaces its note |
 | Unpair | Clears this device's settings. Your items and other devices are untouched |
 
 Sync by hand any time: the **inbox** icon in the ribbon, or the command **dropit: Sync now**.
@@ -85,7 +85,7 @@ Sync by hand any time: the **inbox** icon in the ribbon, or the command **dropit
 ## How it stays connected
 
 - A heartbeat every 60 s detects dead connections — after sleep/wake, a socket often looks open but receives nothing — and reconnects with backoff from 1 s up to 60 s.
-- If real-time push isn't included in your plan, the plugin doesn't retry or complain; it catches up on start and whenever you sync by hand.
+- If real-time push isn't included in your plan (new accounts get it for 14 days), the plugin says so once and stops asking; it catches up on start and whenever you sync by hand, and a manual sync also tries real-time again.
 - There is no polling timer; the heartbeat is the only one.
 
 ## When something goes wrong

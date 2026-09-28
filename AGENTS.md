@@ -63,7 +63,7 @@ Chinese — [README.zh-CN.md](./README.zh-CN.md) names them.
 
 ### 5 · Verify
 
-- The dropit settings page now shows *Folder* (default `Inbox`) and *Cursor*.
+- The dropit settings page now shows *Folder* (default `Inbox`) and *Pull again*.
 - Send a test item from another device — e.g. `dropit send "hello from the CLI"` — and check that
   `Inbox/YYYY-MM-DD-<seq>.md` appears within a few seconds (or after the ribbon's **inbox** icon
   / the command *dropit: Sync now* if real-time push isn't available).
