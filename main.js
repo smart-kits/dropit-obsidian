@@ -487,9 +487,11 @@ const DropitPlugin = class DropitPlugin extends Plugin {
    */
   async deliver(item, ctx) {
     const { seq } = item;
+    // Sent from this vault: it's already here. The server says which device sent each item; the list of
+    // seqs we sent is the fallback for a server that doesn't, and only covers items not seen yet.
     const own = this.settings.sent.indexOf(seq);
-    if (own !== -1) {                              // sent from this vault: it's already here
-      this.settings.sent.splice(own, 1);
+    if (own !== -1) this.settings.sent.splice(own, 1);
+    if (own !== -1 || (item.device_id && item.device_id === this.settings.device_id)) {
       this.settings.maxSeq = Math.max(this.settings.maxSeq, seq);
       return null;
     }

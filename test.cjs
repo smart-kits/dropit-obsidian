@@ -395,6 +395,15 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       && files.has('Inbox/09-17 08.00 from elsewhere.md'), [...files.keys()].join());
     ok('…and is forgotten once seen', !p.settings.sent.includes(70) && p.settings.cursor === 72, JSON.stringify(p.settings.sent));
     ok('both the text and the uploaded file were remembered', p.settings.sent.includes(71), JSON.stringify(p.settings.sent));
+    p.settings.device_id = 'd_me';
+    p.settings.cursor = 0;
+    serve({ 'GET /v1/pull': pages([text(70, 'https://example.com/x', { source: 'obsidian', device_id: 'd_me' }), text(72, 'from elsewhere', { device_id: 'd_phone' })]),
+      'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+    await p.repull('all');
+    ok('pulling again still leaves out what this device sent (the server says who sent it)', ![...files.keys()].some((k) => k.includes('example.com')), [...files.keys()].join());
+    serve({ 'GET /v1/pull': pages([text(74, 'sent here, never remembered', { device_id: 'd_me' })]) });
+    await p.sync(false);
+    ok('…even one this vault never recorded (a push that beat the send response)', ![...files.keys()].some((k) => k.includes('never remembered')) && p.settings.cursor === 74, [...files.keys()].join());
     let resolve;
     p.api = () => new Promise((r) => { resolve = r; });
     const pulls = [];
@@ -403,7 +412,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     const held = p.sync(false);
     ok('a push while sending waits for the send', await held === 0);
     delete p.api;
-    serve({ 'GET /v1/pull': (b, path) => { pulls.push(path); return { json: { items: [], has_more: false, next_after: 72 } }; } });
+    serve({ 'GET /v1/pull': (b, path) => { pulls.push(path); return { json: { items: [], has_more: false, next_after: 74 } }; } });
     resolve({ seq: 73 });
     await inFlight;
     await settle(); await settle();
