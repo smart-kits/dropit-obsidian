@@ -414,7 +414,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('one notice for both', notices.at(-1) === 'dropit: sent 2 items', notices.at(-1));
     serve({ 'POST /v1/ingest': () => ({ status: 409, json: { error: 'DEDUPED', seq: 70 } }) });
     await p.sendText('again');
-    ok('a duplicate says so', notices.at(-1) === 'dropit: already sent today', notices.at(-1));
+    ok('a duplicate says so', notices.at(-1) === 'dropit: already sent a moment ago', notices.at(-1));
     serve({ 'GET /v1/pull': pages([text(70, 'https://example.com/x', { source: 'obsidian' }), text(72, 'from elsewhere')]) });
     await p.sync(false);
     ok('what this vault sent is not written back into it', ![...files.keys()].some((k) => k.includes('example.com'))
