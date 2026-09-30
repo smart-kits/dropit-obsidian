@@ -10,10 +10,11 @@
 
 const obsidian = require('obsidian');
 const {
-  Plugin, PluginSettingTab, Setting, Notice, Modal, FuzzySuggestModal, normalizePath, requestUrl, addIcon,
+  Plugin, PluginSettingTab, Setting, Notice, Modal, FuzzySuggestModal, normalizePath, requestUrl, addIcon, Platform,
 } = obsidian;
 
 const DEFAULT_ENDPOINT = 'https://dropit.smart-kits.xyz';
+const REPO = 'https://github.com/smart-kits/dropit-obsidian';
 
 const DEFAULTS = {
   endpoints: [DEFAULT_ENDPOINT], // tried in order; the first one that answers moves to the front
@@ -160,6 +161,11 @@ const STRINGS = {
     removeConfirm: (name) => `Remove “${name}”? It stops sending and receiving right away.`,
     removeYes: 'Remove',
     cancel: 'Cancel',
+    feedback: 'Feedback',
+    feedbackDesc: 'Something wrong, or an idea? Tell us on GitHub. Issues are public: never paste your token.',
+    reportIssue: 'Report a problem',
+    sourceCode: 'Source code',
+    issueBody: (env) => `What happened, or what you'd like:\n\n\n---\n${env}\n\nPlease don't paste a token (dk_…) or anything private: issues are public.`,
     advanced: 'Advanced',
     serverAddress: 'Server address',
     serverAddressDesc: 'Rarely needs changing. If it stops answering, the built-in address is tried next.',
@@ -276,6 +282,11 @@ const STRINGS = {
     removeConfirm: (name) => `移除「${name}」？它会立刻停止收发。`,
     removeYes: '移除',
     cancel: '取消',
+    feedback: '反馈',
+    feedbackDesc: '遇到问题或有想法？到 GitHub 告诉我们。issue 是公开的，不要贴你的 token。',
+    reportIssue: '反馈问题',
+    sourceCode: '源代码',
+    issueBody: (env) => `发生了什么，或者你希望怎样：\n\n\n---\n${env}\n\n请不要贴 token（dk_ 开头）或私人内容：issue 是公开的。`,
     advanced: '高级',
     serverAddress: '服务地址',
     serverAddressDesc: '一般不用改。这个地址连不上时，会自动改用内置地址。',
@@ -1155,6 +1166,14 @@ const MIME = {
 };
 const mimeOf = (ext) => MIME[String(ext).toLowerCase()] ?? 'application/octet-stream';
 
+/** Versions and platform only: an issue is public */
+function issueUrl(version) {
+  const platform = Platform?.isIosApp ? 'iOS' : Platform?.isAndroidApp ? 'Android' : Platform?.isMacOS ? 'macOS'
+    : Platform?.isWin ? 'Windows' : Platform?.isLinux ? 'Linux' : 'unknown';
+  const env = `Plugin: ${version} · Obsidian: ${obsidian.apiVersion ?? '?'} · ${platform}`;
+  return `${REPO}/issues/new?title=${encodeURIComponent(`[${version}] `)}&body=${encodeURIComponent(t.issueBody(env))}`;
+}
+
 function ago(ms) {
   const s = (Date.now() - ms) / 1000;
   if (s < 90) return t.ago.now;
@@ -1404,7 +1423,18 @@ class DropitSettingTab extends PluginSettingTab {
     this.containerEl.empty();
     window.clearInterval(this.pairTimer);
     this.plugin.settings.token ? this.paired() : this.setup();
+    this.feedback();
     this.advanced();
+  }
+
+  /** The source, and a new issue with the versions filled in — never anything from this account */
+  feedback() {
+    const version = this.plugin.manifest?.version ?? '';
+    new Setting(this.containerEl)
+      .setName(t.feedback)
+      .setDesc(t.feedbackDesc)
+      .addButton((b) => b.setButtonText(t.reportIssue).onClick(() => window.open(issueUrl(version))))
+      .addButton((b) => b.setButtonText(t.sourceCode).onClick(() => window.open(REPO)));
   }
 
   hide() {
@@ -1654,4 +1684,4 @@ class Confirm extends Modal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { STRINGS, QR, noteTitle, renderText, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges });
+Object.assign(module.exports, { STRINGS, QR, noteTitle, renderText, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });

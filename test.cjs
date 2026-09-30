@@ -463,6 +463,15 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok(`renders when paired (${mode}), without a promise adopting a Setting`, !err && thenCalls < 50, err?.stack ?? `${thenCalls} then() calls`);
   }
 
+  console.log('── Feedback ──');
+  {
+    const url = new URL(DropitPlugin.issueUrl('3.0.3'));
+    const body = url.searchParams.get('body');
+    ok('a new issue on the public plugin repository', url.origin + url.pathname === 'https://github.com/smart-kits/dropit-obsidian/issues/new');
+    ok('title and body carry the version, and a warning about tokens', url.searchParams.get('title') === '[3.0.3] ' && body.includes('Plugin: 3.0.3') && /token/.test(body), body);
+    ok('nothing from the account goes in it', !/dk_x|d_me|Inbox/.test(url.href), url.href);
+  }
+
   console.log('── Real-time not included ──');
   {
     const { p } = await makePlugin();

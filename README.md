@@ -169,6 +169,7 @@ module.exports = async ({ app }) => {
 | Pull again | Pulls again: **everything**, **the last N items**, or **the last N days**. What's already in the vault is skipped; downloads that failed are tried again |
 | Add a device | A pairing code and QR code for a new device |
 | Devices | Every device on your account; remove the ones you don't use |
+| Feedback | *Report a problem* opens a new issue on GitHub with the plugin and Obsidian versions filled in; *Source code* opens this repository. Issues are public: never paste your token |
 | Advanced → Server address | Rarely needs changing. If it stops answering, the built-in address is tried next |
 | Advanced → Unpair | Clears this device's settings. Your items and other devices are untouched |
 
