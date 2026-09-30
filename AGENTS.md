@@ -63,10 +63,11 @@ Chinese — [README.zh-CN.md](./README.zh-CN.md) names them.
 
 ### 5 · Verify
 
-- The dropit settings page now shows *Folder* (default `Inbox`) and *Pull again*.
+- The status bar shows **● dropit** (receiving live) or **○ dropit** (not live, e.g. real-time isn't in
+  the plan). The top of *Settings → dropit* says the same, with the plan and device count.
 - Send a test item from another device — e.g. `dropit send "hello from the CLI"` — and check that
-  `Inbox/YYYY-MM-DD-<seq>.md` appears within a few seconds (or after the ribbon's **inbox** icon
-  / the command *dropit: Sync now* if real-time push isn't available).
+  `Inbox/MM-DD HH.mm hello from the CLI.md` appears within a few seconds (or after clicking the
+  status bar item / running *dropit: Sync now* if real-time push isn't available).
 
 ### 6 · Warn about vault sync
 
@@ -76,7 +77,7 @@ offer to add that path to the vault's `.gitignore`.
 
 ### Uninstall
 
-👤 *Settings → dropit → Unpair*, disable the plugin, then
+👤 *Settings → dropit → Advanced → Unpair*, disable the plugin, then
 `rm -rf "$VAULT/.obsidian/plugins/dropit"`. To revoke the device itself, run `dropit devices`
 and `dropit revoke <device_id>` from a CLI with a full token.
 
@@ -84,9 +85,10 @@ and `dropit revoke <device_id>` from a CLI with a full token.
 
 | Notice | Meaning | Fix |
 |---|---|---|
-| `Invalid token` · `This device was removed` | Token invalid or device revoked | 👤 Unpair, then join with a fresh code |
+| `Invalid token` · `This device was removed` | Token invalid or device revoked | 👤 *Advanced → Unpair*, then join with a fresh code |
 | `Invalid pairing code` · `Pairing code expired` | Wrong or expired code | Get a fresh code (valid 5 min) |
-| `Device limit reached` | Device limit reached | `dropit revoke <id>` an unused device |
+| `Device limit reached` | Device limit reached | 👤 remove an unused device under *Settings → dropit → Devices* |
+| `⚠ dropit` in the status bar | The last sync failed; hover for the reason | Check the network; the built-in server address is tried automatically |
 | Nothing arrives | Plugin disabled, or not paired | Check steps 3–4; details are in the developer console under `[dropit]` |
 
 ---
@@ -101,5 +103,10 @@ and `dropit revoke <device_id>` from a CLI with a full token.
 - **Commit messages in English.**
 - **Docs come in pairs:** `README.md` (English) and `README.zh-CN.md`. Change both.
 - **No backend details** in docs or comments — the plugin talks to the API; that's all it needs to know.
-- **No build step:** `main.js` is loaded by Obsidian as-is (plain CommonJS).
+- **No build step:** `main.js` is loaded by Obsidian as-is (plain CommonJS). The release files are
+  `main.js`, `manifest.json` and `styles.css` — styling goes in `styles.css`, not inline.
+- **Never return a `Setting` (or any settings component) from a promise callback.** Obsidian's `Setting`
+  has a `then()` method, so a promise adopts it as a thenable, `then()` hands itself back, and the window
+  hangs at 100% CPU. Write `.then((m) => { row.setDesc(m); })`, not `.then((m) => row.setDesc(m))`.
+  `test.cjs` renders the settings page with a thenable `Setting` to catch this.
 - `manifest.json` must stay at the repository root (the Obsidian community directory reads it there).

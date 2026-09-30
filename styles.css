@@ -1,0 +1,42 @@
+/* dropit · settings and notices. Obsidian's own variables, so every theme fits. */
+
+.dropit-pair {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-4);
+  padding: var(--size-4-3) 0 var(--size-4-4);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.dropit-qr svg {
+  display: block;
+  border-radius: var(--radius-s);
+}
+
+.dropit-code {
+  font-family: var(--font-monospace);
+  font-size: 2em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
+.dropit-number {
+  width: 6em;
+}
+
+.dropit-advanced {
+  margin-top: var(--size-4-6);
+}
+
+.dropit-advanced > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: var(--size-4-2) 0;
+}
+
+.dropit-notice-link {
+  margin-top: var(--size-4-1);
+  text-decoration: underline;
+  cursor: pointer;
+}
