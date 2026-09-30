@@ -1462,7 +1462,7 @@ class DropitSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName(t.haveCode)
       .setDesc(t.haveCodeDesc)
-      .addText((x) => x.setPlaceholder('K7M-2QX').onChange((v) => { code = v; }))
+      .addText((x) => x.setPlaceholder('K7M2QX').onChange((v) => { code = v; }))
       .addButton((b) => b.setButtonText(t.join).setCta().onClick(() => this.run(() => this.plugin.claimCode(code))));
     new Setting(containerEl)
       .setName(t.create)
@@ -1562,7 +1562,7 @@ class DropitSettingTab extends PluginSettingTab {
     box.toggle(true);
     QR.draw(box.createDiv({ cls: 'dropit-qr' }), `${p.base()}/?pair=${code}`, { scale: 4 });
     const side = box.createDiv();
-    side.createDiv({ cls: 'dropit-code', text: `${code.slice(0, 3)}-${code.slice(3)}` });
+    side.createDiv({ cls: 'dropit-code', text: code });      // exactly what to type: no dash to skip over
     const hint = side.createDiv({ cls: 'setting-item-description' });
     let ticks = 0;
     const tick = async () => {
