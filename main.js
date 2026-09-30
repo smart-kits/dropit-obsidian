@@ -27,6 +27,8 @@ const DEFAULTS = {
   hookCommand: '',               // an Obsidian command id to run after each item is written
   batches: {},                   // batch id → where its first item went, so later ones join it
   sent: [],                      // seqs this device sent: they come back in the pull, and are skipped
+  appended: [],                  // seqs added to the append note or daily notes, as [first, last] ranges
+  missingAt: {},                 // seq → { path, line }: the warning written where a failed download goes
 };
 
 const PAGE = 200;
@@ -39,6 +41,7 @@ const BATCH_KEEP_MS = 86_400_000; // a batch's later items arrive within seconds
 const ENDPOINTS_CHECK_MS = 86_400_000;
 const MAX_SEND_FILES = 16;
 const SENT_KEEP = 200;
+const MISSING_KEEP = 500;
 const TEXT_MAX_BYTES = 1_000_000;
 const ICON = 'dropit';
 
@@ -399,6 +402,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULTS, data);
     this.settings.batches = { ...(data.batches ?? {}) };
     this.settings.sent = [...(data.sent ?? [])];
+    this.settings.appended = (data.appended ?? []).map((r) => [...r]);
+    this.settings.missingAt = { ...(data.missingAt ?? {}) };
     // Upgrading from a version that didn't record it: everything up to the cursor is already in the vault.
     if (data.maxSeq == null) this.settings.maxSeq = this.settings.cursor;
   }
@@ -496,8 +501,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       return null;
     }
     if (seq <= this.settings.maxSeq) {             // pulled before — this is a pull-again or a crash replay
-      ctx.index ??= await this.buildIndex();
-      if (ctx.index.written.has(seq)) return null;
+      ctx.index ??= this.buildIndex();
+      if (ctx.index.written.has(seq) || inRanges(this.settings.appended, seq)) return null;
       const where = ctx.index.missing.get(seq);
       if (where) return item.url ? this.retryMissing(item, where, ctx) : null;
     }
@@ -519,9 +524,10 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   /**
    * What's already in the vault, built only when an item at or below maxSeq comes back (pulling again).
    * New notes carry `dropit_seq` in their front matter — the metadata cache has it without reading files.
-   * Appended entries carry an invisible `%%dropit 12%%` comment, so only the append targets are read.
+   * Appended entries carry nothing in the note (a %% comment shows in live preview): they're in
+   * settings.appended, checked in deliver().
    */
-  async buildIndex() {
+  buildIndex() {
     const written = new Map();
     const missing = new Map();
     const batches = new Map();
@@ -533,27 +539,9 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       for (const s of listOf(fm.dropit_missing)) missing.set(Number(s), file.path);
       if (fm.dropit_batch) batches.set(String(fm.dropit_batch), file.path);
     }
-    for (const file of await this.markerFiles()) {
-      const text = await vault.cachedRead(file);
-      for (const [, failed, seqs] of text.matchAll(MARKER_RE)) {
-        for (const s of seqs.trim().split(/\s+/)) (failed ? missing : written).set(Number(s), file.path);
-      }
-    }
+    for (const [seq, at] of Object.entries(this.settings.missingAt)) missing.set(Number(seq), at.path);
     for (const s of written.keys()) missing.delete(s);   // a later success wins
     return { written, missing, batches };
-  }
-
-  /** The notes that appended entries can be in: the append note, and the daily notes */
-  async markerFiles() {
-    const files = [];
-    const one = this.app.vault.getFileByPath(normalizePath(withMd(this.settings.appendPath || DEFAULTS.appendPath)));
-    if (one) files.push(one);
-    const { folder } = await this.dailyOptions();
-    const prefix = folder ? `${normalizePath(folder)}/` : '';
-    for (const f of this.app.vault.getMarkdownFiles()) {
-      if (f !== one && f.path.startsWith(prefix) && (prefix || !f.path.includes('/'))) files.push(f);
-    }
-    return files;
   }
 
   /** Create where this item (and the rest of its batch) goes. @returns {{path, kind: 'note'|'append'}} */
@@ -603,12 +591,13 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       } catch (err) {
         console.error('[dropit] download failed', item.seq, err);
         missing = true;
-        lines = [`${missingLine(item, err)} %%dropit-missing ${item.seq}%%`];
+        lines = [missingLine(item, err)];
+        this.settings.missingAt[item.seq] = { path: dest.path, line: lines[0] };
       }
     } else {
       lines = renderText(item);
     }
-    if (dest.kind === 'append' && !missing) lines.push(`%%dropit ${item.seq}%%`);
+    if (dest.kind === 'append' && !missing) addToRanges(this.settings.appended, item.seq);
     await vault.process(file, (s) => joinBlock(s, lines, dest.kind === 'note' ? '\n\n' : '\n'));
     if (dest.kind === 'note') {
       await fileManager.processFrontMatter(file, (fm) => addSeq(fm, missing ? 'dropit_missing' : 'dropit_seq', item.seq));
@@ -626,10 +615,13 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       console.error('[dropit] download failed again', item.seq, err);
       return null;
     }
-    const isNote = !!this.app.metadataCache.getFileCache(file)?.frontmatter?.dropit_missing;
-    const embed = `!${fileManager.generateMarkdownLink(saved, path)}${isNote ? '' : `\n%%dropit ${item.seq}%%`}`;
-    const marker = new RegExp(`^.*%%dropit-missing ${item.seq}%%.*$`, 'm');
-    await vault.process(file, (s) => (marker.test(s) ? s.replace(marker, () => embed) : joinBlock(s, [embed], '\n\n')));
+    const isNote = listOf(this.app.metadataCache.getFileCache(file)?.frontmatter?.dropit_missing).map(Number).includes(item.seq);
+    const embed = `!${fileManager.generateMarkdownLink(saved, path)}`;
+    // Put it where the warning was; if the warning was edited away, at the end.
+    const warning = this.settings.missingAt[item.seq]?.line;
+    await vault.process(file, (s) => (warning && s.includes(warning) ? s.replace(warning, () => embed) : joinBlock(s, [embed], '\n\n')));
+    delete this.settings.missingAt[item.seq];
+    if (!isNote) addToRanges(this.settings.appended, item.seq);
     if (isNote) {
       await fileManager.processFrontMatter(file, (fm) => {
         const left = listOf(fm.dropit_missing).filter((s) => Number(s) !== item.seq);
@@ -943,7 +935,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   }
 
   async adopt({ token, device_id }) {
-    Object.assign(this.settings, { token, device_id, cursor: 0, maxSeq: 0, batches: {}, sent: [], noRealtimeNoticed: false });
+    Object.assign(this.settings, { token, device_id, cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {}, noRealtimeNoticed: false });
     this.noRealtime = false;
     await this.save();
     await this.sync(true);
@@ -952,7 +944,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   }
 
   async unpair() {
-    Object.assign(this.settings, { token: '', device_id: '', cursor: 0, maxSeq: 0, batches: {}, sent: [] });
+    Object.assign(this.settings, { token: '', device_id: '', cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {} });
     await this.save();
     this.socket?.close();
     this.socket = null;
@@ -1023,13 +1015,30 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   save() {
     const now = Date.now();
     for (const [id, b] of Object.entries(this.settings.batches)) if (!(now - b.at < BATCH_KEEP_MS)) delete this.settings.batches[id];
+    const missing = Object.keys(this.settings.missingAt).map(Number).sort((a, b) => a - b);
+    for (const seq of missing.slice(0, Math.max(0, missing.length - MISSING_KEEP))) delete this.settings.missingAt[seq];
     return this.saveData(this.settings);
   }
 };
 
 // ── Rendering ───────────────────────────────────────────────────────────
 
-const MARKER_RE = /%%dropit(-missing)? ([\d ]+)%%/g;
+/** A sorted list of [first, last] ranges: seqs mostly come in a row, so thousands stay a few pairs. */
+function inRanges(ranges, n) {
+  return ranges.some(([a, b]) => n >= a && n <= b);
+}
+
+function addToRanges(ranges, n) {
+  if (inRanges(ranges, n)) return;
+  ranges.push([n, n]);
+  ranges.sort((x, y) => x[0] - y[0]);
+  for (let i = ranges.length - 1; i > 0; i--) {
+    if (ranges[i][0] <= ranges[i - 1][1] + 1) {
+      ranges[i - 1][1] = Math.max(ranges[i - 1][1], ranges[i][1]);
+      ranges.splice(i, 1);
+    }
+  }
+}
 
 const pad = (n) => String(n).padStart(2, '0');
 const mb = (bytes, digits = 1) => (bytes / 1_048_576).toFixed(digits);
@@ -1645,4 +1654,4 @@ class Confirm extends Modal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { STRINGS, QR, noteTitle, renderText, payloadOf, joinBlock, addSeq, coreTemplate });
+Object.assign(module.exports, { STRINGS, QR, noteTitle, renderText, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges });

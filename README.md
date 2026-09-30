@@ -89,15 +89,14 @@ several sent together.
 ```markdown
 **09-29 15:30** · ios-shortcut
 Call the dentist back
-%%dropit 44%%
 ```
 
 **Today's daily note.** Same format, added to the end of today's note — using the folder, date
 format and template of the core *Daily notes* plugin. If today's note doesn't exist yet it's created
 from that template; a template written for Templater goes through Templater.
 
-The `%%dropit 44%%` comment is invisible in reading view and live preview. It's how pulling again
-knows the item is already there — leave it in place.
+Nothing else is added to the note. The plugin remembers which items it appended, so pulling again
+skips them — including one you've since deleted from the note on purpose.
 
 ## Send to dropit
 
