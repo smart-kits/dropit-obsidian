@@ -9,6 +9,12 @@ dropit delivers; what happens next is up to you. If you want more — summaries,
 plugin can hand each item to a command of your own choosing, and stays out of it (see [Run your own
 command](#run-your-own-command)).
 
+## At a glance
+
+- **Receives** whatever you send to dropit from any device — text, links, photos, videos, files — as notes in your vault, with the files embedded.
+- **Sends** from Obsidian: select text → right-click → *Send to dropit*; or right-click a note or several files in the file list → *Send to dropit*.
+- To send from your phone, browser or terminal, see [what each dropit client can send, and how](https://github.com/smart-kits/dropit-client#what-can-i-send-and-how).
+
 ## Features
 
 - **Real-time.** New items appear seconds after you send them. The status bar shows it: **● dropit** receiving live, **○ dropit** not.
