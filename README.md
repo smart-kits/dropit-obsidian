@@ -185,7 +185,7 @@ Sync by hand any time: click the status bar item or the ribbon icon, or run *dro
 
 - Real-time push over a WebSocket. A heartbeat every 60 s detects dead connections — after sleep/wake a socket often looks open but receives nothing — and reconnects with backoff from 1 s up to 60 s.
 - Coming back to the Obsidian window syncs when the connection isn't known to be live.
-- If real-time push isn't included in your plan (new accounts get it for 14 days), the plugin says so once and stops asking; it syncs when Obsidian opens, when you come back to it, and when you sync by hand.
+- If real-time push isn't included in your plan (new accounts get it for 10 days), the plugin says so once and stops asking; it syncs when Obsidian opens, when you come back to it, and when you sync by hand.
 
 ## When something goes wrong
 

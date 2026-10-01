@@ -101,7 +101,7 @@ const STRINGS = {
     },
     unnamedFile: 'untitled file',
     missing: (name, kb, msg) => `⚠️ ${name} (${kb} KB) couldn't be downloaded: ${msg}. Settings → dropit → Pull again tries once more.`,
-    noRealtime: 'dropit: real-time push isn\'t in your plan (new accounts get it for 14 days). '
+    noRealtime: 'dropit: real-time push isn\'t in your plan (new accounts get it for 10 days). '
       + 'New items now arrive when Obsidian opens, when you come back to it, or when you sync by hand.',
     // settings · not paired
     setupHeading: 'Join with a pairing code',
@@ -117,7 +117,7 @@ const STRINGS = {
     stateOffline: '○ Disconnected — reconnecting',
     stateError: (msg) => `⚠ ${msg}`,
     account: (m) => `${m.plan === 'paid' ? 'Paid' : 'Free'} · ${m.devices_used} of ${m.devices_limit} devices · `
-      + `${mb(m.bytes_used)} of ${mb(m.bytes_limit, 0)} MB · items kept ${m.plan === 'paid' ? 30 : 14} days`,
+      + `${mb(m.bytes_used)} of ${mb(m.bytes_limit, 0)} MB · items kept ${m.plan === 'paid' ? '10 days' : '1 day'} after sending`,
     accountLoading: 'Loading…',
     syncNow: 'Sync now',
     receiveHeading: 'Receiving',
@@ -225,7 +225,7 @@ const STRINGS = {
     },
     unnamedFile: '未命名文件',
     missing: (name, kb, msg) => `⚠️ ${name}（${kb} KB）没能下载下来：${msg}。设置 → dropit → 重新拉取 会再试一次。`,
-    noRealtime: 'dropit：当前套餐不含实时推送（新账号有 14 天体验期）。新内容改为在打开 Obsidian、回到窗口或手动同步时拉取。',
+    noRealtime: 'dropit：当前套餐不含实时推送（新账号有 10 天体验期）。新内容改为在打开 Obsidian、回到窗口或手动同步时拉取。',
     setupHeading: '用配对码加入',
     haveCode: '配对码',
     haveCodeDesc: '在你已经在用的 dropit 客户端里生成，6 位，5 分钟内有效',
@@ -238,7 +238,7 @@ const STRINGS = {
     stateOffline: '○ 已断开，正在重连',
     stateError: (msg) => `⚠ ${msg}`,
     account: (m) => `${m.plan === 'paid' ? '付费版' : '免费版'} · 设备 ${m.devices_used}/${m.devices_limit} 台 · `
-      + `空间 ${mb(m.bytes_used)}/${mb(m.bytes_limit, 0)} MB · 保留 ${m.plan === 'paid' ? 30 : 14} 天`,
+      + `空间 ${mb(m.bytes_used)}/${mb(m.bytes_limit, 0)} MB · 投递后保留 ${m.plan === 'paid' ? 10 : 1} 天`,
     accountLoading: '正在读取…',
     syncNow: '立即同步',
     receiveHeading: '接收',

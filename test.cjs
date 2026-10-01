@@ -484,7 +484,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     await p.connect();
     ok('asks for a ticket once', asked === 1, String(asked));
     ok('remembers that real-time is not included', p.noRealtime === true && p.state === 'manual', p.state);
-    ok('says so once, mentioning the 14-day trial', notices.length === 1 && /14/.test(notices[0]), JSON.stringify(notices));
+    ok('says so once, mentioning the 10-day trial', notices.length === 1 && /10/.test(notices[0]), JSON.stringify(notices));
     p.heartbeat(); p.heartbeat();
     await settle();
     ok('heartbeats stop asking (every one used to)', asked === 1, String(asked));
