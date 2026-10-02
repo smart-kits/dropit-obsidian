@@ -38,6 +38,7 @@ const STALE_MS = 150_000;         // silent for two heartbeats = dead connection
 const BACKOFF_MS = [1_000, 2_000, 5_000, 15_000, 30_000, 60_000];
 const FOCUS_SYNC_MS = 10_000;     // at most one catch-up sync per 10 s of window focus changes
 const HOOK_GAP_MS = 1_000;        // between two runs of the user's command
+const DAY_MS = 86_400_000;
 const BATCH_KEEP_MS = 86_400_000; // a batch's later items arrive within seconds; a day is plenty
 const ENDPOINTS_CHECK_MS = 86_400_000;
 const MAX_SEND_FILES = 16;
@@ -103,6 +104,16 @@ const STRINGS = {
     missing: (name, kb, msg) => `⚠️ ${name} (${kb} KB) couldn't be downloaded: ${msg}. Settings → dropit → Pull again tries once more.`,
     noRealtime: 'dropit: real-time push isn\'t in your plan (new accounts get it for 10 days). '
       + 'New items now arrive when Obsidian opens, when you come back to it, or when you sync by hand.',
+    trialOver: 'dropit: the 10-day real-time trial has ended. '
+      + 'New items now arrive when Obsidian opens, when you come back to it, or when you sync by hand.',
+    trialEnding: 'dropit: real-time push ends in less than a day (new accounts get it for 10 days). '
+      + 'After that, new items arrive when Obsidian opens, when you come back to it, or when you sync by hand.',
+    trialFull: 'dropit: today\'s real-time spots are full — it comes back by itself tomorrow. '
+      + 'Until then, new items arrive when Obsidian opens, when you come back to it, or when you sync by hand.',
+    daysLeft: (n) => (n < 1 ? 'less than a day left' : `${n} day${n === 1 ? '' : 's'} left`),
+    tipLiveTrial: (left) => `Receiving in real time (trial: ${left}) · click to sync now`,
+    tipTrialOver: 'Real-time trial ended · syncs when Obsidian opens or you come back to it · click to sync now',
+    tipTrialFull: 'Today\'s real-time spots are full, back tomorrow · click to sync now',
     // settings · not paired
     setupHeading: 'Join with a pairing code',
     haveCode: 'Pairing code',
@@ -113,7 +124,10 @@ const STRINGS = {
     createButton: 'Create a new account',
     // settings · paired
     stateLive: '● Receiving in real time',
+    stateLiveTrial: (left) => `● Receiving in real time · trial: ${left}`,
     stateManual: '○ Syncs when you open or come back to Obsidian',
+    stateTrialOver: '○ Real-time trial ended · syncs when you open or come back',
+    stateTrialFull: '○ Real-time spots are full today · back tomorrow',
     stateOffline: '○ Disconnected — reconnecting',
     stateError: (msg) => `⚠ ${msg}`,
     account: (m) => `${m.plan === 'paid' ? 'Paid' : 'Free'} · ${m.devices_used} of ${m.devices_limit} devices · `
@@ -226,6 +240,13 @@ const STRINGS = {
     unnamedFile: '未命名文件',
     missing: (name, kb, msg) => `⚠️ ${name}（${kb} KB）没能下载下来：${msg}。设置 → dropit → 重新拉取 会再试一次。`,
     noRealtime: 'dropit：当前套餐不含实时推送（新账号有 10 天体验期）。新内容改为在打开 Obsidian、回到窗口或手动同步时拉取。',
+    trialOver: 'dropit：10 天的实时推送体验已结束。新内容改为在打开 Obsidian、回到窗口或手动同步时拉取。',
+    trialEnding: 'dropit：实时推送体验不到 1 天就结束了（新账号有 10 天）。之后新内容在打开 Obsidian、回到窗口或手动同步时拉取。',
+    trialFull: 'dropit：今天的实时名额满了，明天自动恢复。在那之前，新内容在打开 Obsidian、回到窗口或手动同步时拉取。',
+    daysLeft: (n) => (n < 1 ? '不到 1 天' : `还剩 ${n} 天`),
+    tipLiveTrial: (left) => `实时接收中（体验${left}）· 点击立即同步`,
+    tipTrialOver: '实时推送体验已结束 · 打开或回到 Obsidian 时同步 · 点击立即同步',
+    tipTrialFull: '今天的实时名额满了，明天自动恢复 · 点击立即同步',
     setupHeading: '用配对码加入',
     haveCode: '配对码',
     haveCodeDesc: '在你已经在用的 dropit 客户端里生成，6 位，5 分钟内有效',
@@ -234,7 +255,10 @@ const STRINGS = {
     createDesc: '在这台设备上创建新账号，之后在这里把手机和浏览器加进来',
     createButton: '创建新账号',
     stateLive: '● 实时接收中',
+    stateLiveTrial: (left) => `● 实时接收中 · 体验${left}`,
     stateManual: '○ 打开或回到 Obsidian 时同步',
+    stateTrialOver: '○ 实时推送体验已结束 · 打开或回到时同步',
+    stateTrialFull: '○ 今天的实时名额满了 · 明天自动恢复',
     stateOffline: '○ 已断开，正在重连',
     stateError: (msg) => `⚠ ${msg}`,
     account: (m) => `${m.plan === 'paid' ? '付费版' : '免费版'} · 设备 ${m.devices_used}/${m.devices_limit} 台 · `
@@ -390,6 +414,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     this.register(() => {
       this.unloaded = true;
       window.clearTimeout(this.reconnectTimer);
+      window.clearTimeout(this.retryTimer);
       this.socket?.close();
     });
 
@@ -733,7 +758,9 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   async connect() {
     if (this.socket || !this.settings.token || this.unloaded || this.noRealtime) return;
     try {
-      const { ticket } = await this.api('POST', '/v1/ws/ticket');
+      const { ticket, realtime_until: until } = await this.api('POST', '/v1/ws/ticket');
+      this.realtimeUntil = until ?? null;             // null = paid, always on; otherwise the end of the trial
+      this.ticketDay = Math.floor(Date.now() / DAY_MS);  // the trial's real-time is granted per UTC day
       if (this.unloaded || this.socket) return;
       const url = new URL(this.base() + '/v1/ws');
       url.protocol = url.protocol.replace('http', 'ws');
@@ -743,12 +770,19 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       this.socket = socket;
       socket.onopen = () => {
         this.retry = 0;
+        this.realtimeWhy = null;
         this.lastBeat = Date.now();
         if (!this.running) this.setStatus('live');
       };
       socket.onmessage = (ev) => {
         this.lastBeat = Date.now();
-        if (ev.data !== 'pong') this.sync(false);
+        if (ev.data === 'pong') return;
+        this.sync(false);
+        // The last push of a day whose real-time spots ran out says so, and the server then closes the socket.
+        // Read it here rather than from the close: a socket the server closes can sit in CLOSING for a long time.
+        let msg = null;
+        try { msg = JSON.parse(ev.data); } catch { /* not JSON: an older server's message */ }
+        if (msg?.end === 'trial_full') this.stopRealtime('trial_full');
       };
       socket.onclose = () => {
         if (this.socket === socket) this.socket = null;
@@ -757,22 +791,78 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       };
       socket.onerror = () => socket.close();
     } catch (err) {
-      // 403 WS_REQUIRES_PAID: real-time isn't included. Stop asking — every heartbeat used to ask
-      // again, forever — and say once what happens instead. A manual sync or a restart tries again.
-      if (err.code === 'WS_REQUIRES_PAID') {
-        this.noRealtime = true;
-        this.setStatus(this.error ? 'error' : 'manual');
-        if (!this.settings.noRealtimeNoticed) {
-          new Notice(t.noRealtime, 15_000);
-          this.settings.noRealtimeNoticed = true;
-          await this.save();
-        }
-        return;
-      }
+      // 403 WS_REQUIRES_PAID: real-time isn't available — the trial is over, or today's spots are full.
+      if (err.code === 'WS_REQUIRES_PAID') return void await this.stopRealtime(err.data?.reason ?? null);
       console.error('[dropit] ws', err);
       if (this.state !== 'error') this.setStatus('offline');
       this.scheduleReconnect();
     }
+  }
+
+  /**
+   * Real-time is off. trial_over: until the plan changes (a manual sync or a restart asks again).
+   * trial_full: spots are counted per UTC day, so ask again a little after midnight. Either way, say so once —
+   * every heartbeat used to ask again, forever — and fall back to syncing on open, focus and by hand.
+   */
+  async stopRealtime(why) {
+    this.noRealtime = true;
+    this.realtimeWhy = why;
+    const socket = this.socket;
+    this.socket = null;
+    socket?.close();
+    window.clearTimeout(this.reconnectTimer);
+    this.setStatus(this.error ? 'error' : 'manual');
+    if (why === 'trial_full') {
+      // Spread out over ten minutes, so everyone turned away today doesn't ask in the same second.
+      const wait = DAY_MS - (Date.now() % DAY_MS) + Math.random() * 600_000;
+      window.clearTimeout(this.retryTimer);
+      this.retryTimer = window.setTimeout(() => { this.noRealtime = false; this.connect(); }, wait);
+      const day = Math.floor(Date.now() / DAY_MS);
+      if (this.settings.fullNoticedDay === day) return;
+      new Notice(t.trialFull, 15_000);
+      this.settings.fullNoticedDay = day;
+      return void await this.save();
+    }
+    if (this.settings.noRealtimeNoticed) return;
+    new Notice(why === 'trial_over' ? t.trialOver : t.noRealtime, 15_000);
+    this.settings.noRealtimeNoticed = true;
+    await this.save();
+  }
+
+  /**
+   * While on the trial, two things only the client can notice, both handled by asking for a fresh ticket:
+   * - a new UTC day: real-time is granted per day, and a socket can stay open for days. A little after midnight
+   *   (spread over ten minutes) reconnect once, or pushes stop for the rest of the day.
+   * - the end of the trial by the local clock: don't conclude anything here — the user may have upgraded since.
+   *   The server answers: a ticket with no end (paid), or 403 trial_over. At most once an hour, in case clocks disagree.
+   * A day before the end, it warns once. Returns true when it reconnected.
+   */
+  checkTrial() {
+    if (this.realtimeUntil == null || !this.socket) return false;
+    const now = Date.now();
+    const left = this.realtimeUntil - now;
+    if (left > 0 && left < DAY_MS && !this.settings.trialEndingNoticed) {
+      new Notice(t.trialEnding, 15_000);
+      this.settings.trialEndingNoticed = true;
+      this.save();
+    }
+    this.dayJitter ??= Math.random() * 600_000;
+    const newDay = Math.floor((now - this.dayJitter) / DAY_MS) > this.ticketDay;
+    const ended = left <= 0 && now - (this.lastRecheck ?? 0) > 3_600_000;
+    if (!newDay && !ended) return false;
+    if (ended) this.lastRecheck = now;
+    const socket = this.socket;
+    this.socket = null;
+    socket.close();
+    this.connect();
+    return true;
+  }
+
+  /** "3 days left" while on the trial; null on a paid plan or before the server has said */
+  trialLeft() {
+    if (this.realtimeUntil == null) return null;
+    const left = this.realtimeUntil - Date.now();
+    return left > 0 ? t.daysLeft(left < DAY_MS ? 0 : Math.ceil(left / DAY_MS)) : null;
   }
 
   /** Exponential backoff, capped at 60 s */
@@ -785,6 +875,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   heartbeat() {
     if (!this.settings.token || this.noRealtime || this.unloaded) return;
+    if (this.checkTrial()) return;
     if (!this.socket) return void this.connect();
     if (this.socket.readyState !== 1) return;          // still connecting
     if (Date.now() - this.lastBeat > STALE_MS) return void this.socket.close();  // stale — reconnect
@@ -805,7 +896,11 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     if (this.statusEl) {
       this.statusEl.setText(t.status[state]);
       const tip = t.statusTip[state];
-      this.statusEl.setAttribute('aria-label', typeof tip === 'function' ? tip(this.error ?? '') : tip);
+      const left = state === 'live' && this.trialLeft();
+      this.statusEl.setAttribute('aria-label', left ? t.tipLiveTrial(left)
+        : state === 'manual' && this.realtimeWhy === 'trial_over' ? t.tipTrialOver
+          : state === 'manual' && this.realtimeWhy === 'trial_full' ? t.tipTrialFull
+            : typeof tip === 'function' ? tip(this.error ?? '') : tip);
       this.statusEl.setAttribute('data-tooltip-position', 'top');
     }
     this.tab?.onStatus?.();
@@ -946,8 +1041,9 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   }
 
   async adopt({ token, device_id }) {
-    Object.assign(this.settings, { token, device_id, cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {}, noRealtimeNoticed: false });
-    this.noRealtime = false;
+    Object.assign(this.settings, { token, device_id, cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {},
+      noRealtimeNoticed: false, trialEndingNoticed: false, fullNoticedDay: null });
+    Object.assign(this, { noRealtime: false, realtimeWhy: null, realtimeUntil: null });
     await this.save();
     await this.sync(true);
     this.connect();
@@ -1446,9 +1542,13 @@ class DropitSettingTab extends PluginSettingTab {
   onStatus() {
     if (!this.stateSetting) return;
     const p = this.plugin;
+    const live = p.state === 'live' || (p.state === 'syncing' && p.socketFresh());
+    const left = live && p.trialLeft();
     this.stateSetting.setName(p.state === 'error' ? t.stateError(p.error ?? '')
-      : p.state === 'live' || (p.state === 'syncing' && p.socketFresh()) ? t.stateLive
-        : p.noRealtime ? t.stateManual : t.stateOffline);
+      : live ? (left ? t.stateLiveTrial(left) : t.stateLive)
+        : !p.noRealtime ? t.stateOffline
+          : p.realtimeWhy === 'trial_over' ? t.stateTrialOver
+            : p.realtimeWhy === 'trial_full' ? t.stateTrialFull : t.stateManual);
   }
 
   /**
@@ -1483,7 +1583,10 @@ class DropitSettingTab extends PluginSettingTab {
     const account = this.stateSetting;
     // Block bodies, never `=> setting.setX()`: Obsidian's Setting has a then(), so returning one from a
     // promise callback makes the promise adopt it — then() hands itself back, forever, and the window hangs.
-    p.api('GET', '/v1/me').then((m) => { account.setDesc(t.account(m)); }, (err) => { account.setDesc(err.message); });
+    p.api('GET', '/v1/me').then((m) => {
+      account.setDesc(t.account(m));
+      if ('realtime_until' in m) { p.realtimeUntil = m.realtime_until; this.onStatus(); }   // the countdown, fresh
+    }, (err) => { account.setDesc(err.message); });
 
     new Setting(containerEl).setName(t.receiveHeading).setHeading();
     const modeRow = new Setting(containerEl)

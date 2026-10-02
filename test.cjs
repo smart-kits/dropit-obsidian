@@ -493,6 +493,99 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('asking again later does not repeat the notice', notices.length === 1, JSON.stringify(notices));
   }
 
+  console.log('── Real-time trial: countdown, end, full for today ──');
+  {
+    const DAY = 86_400_000;
+    const { p } = await makePlugin();
+    let sock = null;
+    globalThis.WebSocket = class { constructor() { sock = this; this.readyState = 1; } close() { this.closed = true; } send() {} };
+    p.sync = async () => {};
+    p.api = async (m, path) => (path === '/v1/ws/ticket' ? { ticket: 't', realtime_until: Date.now() + 3.5 * DAY } : {});
+    notices.length = 0;
+    await p.connect();
+    sock.onopen();
+    ok('the ticket carries the end of the trial, and the plugin counts down from it', p.trialLeft() === '4 days left', p.trialLeft());
+    p.heartbeat();
+    ok('no warning while more than a day is left', notices.length === 0, JSON.stringify(notices));
+
+    p.realtimeUntil = Date.now() + 3 * 3_600_000;
+    p.heartbeat(); p.heartbeat();
+    ok('less than a day left: warns once', notices.length === 1 && /less than a day/.test(notices[0]) && p.trialLeft() === 'less than a day left', JSON.stringify(notices));
+
+    // The end by the local clock: ask the server rather than conclude — the user may have upgraded meanwhile
+    let tickets = 0;
+    p.api = async (m, path) => {
+      if (path !== '/v1/ws/ticket') return {};
+      tickets++;
+      throw Object.assign(new Error('over'), { code: 'WS_REQUIRES_PAID', data: { reason: 'trial_over' } });
+    };
+    const before = sock;
+    p.realtimeUntil = Date.now() - 1;
+    p.heartbeat();
+    await settle();
+    ok('the trial ends by the local clock: the socket is closed and the server is asked again', before.closed === true && tickets === 1, String(tickets));
+    ok('…the server says it ended: falls back and says so, once', p.noRealtime && p.realtimeWhy === 'trial_over' && notices.length === 2 && /trial has ended/.test(notices[1]), JSON.stringify(notices));
+
+    const u = (await makePlugin()).p;
+    u.sync = async () => {};
+    u.api = async (m, path) => (path === '/v1/ws/ticket' ? { ticket: 't', realtime_until: Date.now() - 1 } : {});
+    await u.connect();
+    sock.onopen();
+    u.api = async (m, path) => (path === '/v1/ws/ticket' ? { ticket: 't', realtime_until: null } : {});
+    notices.length = 0;
+    u.heartbeat();
+    await settle();
+    ok('upgraded during the trial: the recheck gets a ticket with no end, real-time stays on, no notice', u.realtimeUntil === null && !u.noRealtime && notices.length === 0, JSON.stringify({ until: u.realtimeUntil, notices }));
+    u.unloaded = true;
+
+    const d = (await makePlugin()).p;
+    d.sync = async () => {};
+    let dayTickets = 0;
+    d.api = async (m, path) => (path === '/v1/ws/ticket' ? (dayTickets++, { ticket: 't', realtime_until: Date.now() + 5 * DAY }) : {});
+    await d.connect();
+    sock.onopen();
+    d.heartbeat();
+    ok('same UTC day: no new ticket', dayTickets === 1, String(dayTickets));
+    d.ticketDay -= 1;                          // the ticket was from yesterday
+    d.dayJitter = 0;
+    d.heartbeat();
+    await settle();
+    ok('a new UTC day: one fresh ticket (real-time is granted per day; a socket can stay open for days)', dayTickets === 2, String(dayTickets));
+    d.unloaded = true;
+
+    const q = (await makePlugin()).p;
+    q.sync = async () => {};
+    let asked = 0;
+    q.api = async (m, path) => {
+      if (path !== '/v1/ws/ticket') return {};
+      asked++;
+      throw Object.assign(new Error('full'), { code: 'WS_REQUIRES_PAID', data: { reason: 'trial_full' } });
+    };
+    notices.length = 0; timers.length = 0;
+    await q.connect();
+    q.unloaded = true;                         // the retry below fires at once in this stub; stop it at the door
+    const untilMidnight = DAY - (Date.now() % DAY);
+    ok('full for today: says so, and that it comes back tomorrow', q.realtimeWhy === 'trial_full' && notices.length === 1 && /tomorrow/.test(notices[0]), JSON.stringify(notices));
+    ok('asks again a little after midnight UTC, spread over ten minutes', timers.some((ms) => ms >= untilMidnight - 1000 && ms <= untilMidnight + 600_000), JSON.stringify(timers));
+    await settle();
+    await q.stopRealtime('trial_full');
+    ok('turned away again the same day: no second notice', notices.length === 1, JSON.stringify(notices));
+
+    const r = (await makePlugin()).p;
+    r.sync = async () => {};
+    r.api = async (m, path) => (path === '/v1/ws/ticket' ? { ticket: 't', realtime_until: Date.now() + 5 * DAY } : {});
+    await r.connect();
+    sock.onopen();
+    const live = sock;
+    notices.length = 0;
+    sock.onmessage({ data: JSON.stringify({ type: 'new', seq: 7, end: 'trial_full' }) });
+    const after = { closed: live.closed === true, why: r.realtimeWhy, off: r.noRealtime, socket: r.socket };
+    r.unloaded = true;                         // before the stubbed timers fire the midnight retry
+    await settle();
+    ok('the last push of a full day says so: the plugin closes the socket itself and falls back', after.closed && after.why === 'trial_full' && after.off && after.socket === null, JSON.stringify(after));
+    delete globalThis.WebSocket;
+  }
+
   console.log('── Disabled plugin ──');
   {
     const { p } = await makePlugin();
