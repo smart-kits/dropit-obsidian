@@ -21,6 +21,7 @@ command](#run-your-own-command)).
 - **Catches up.** Obsidian was closed for two days, or the laptop slept? Everything sent meanwhile arrives when Obsidian opens or when you come back to it. No polling timer.
 - **One delivery, one note.** Text and files sent together become one note — the text on top, the files embedded below.
 - **Readable names.** Notes are named after their time and content (`09-29 15.30 Slides for the 3pm meeting.md`); links with a page title (from the browser extension) show the title, the link and the description.
+- **Where it came from.** Selections, images and files sent from a web page with the browser extension get one line below them: `— [Page title](https://…)`. Several files from the same page share one line.
 - **Files where you keep attachments.** Saved with their original names, where *Settings → Files and links* says attachments go.
 - **Three places to write.** A new note for each delivery, the end of one note you choose, or today's daily note.
 - **Send from Obsidian.** Right-click selected text, a note or files → *Send to dropit*. Or use the commands.
@@ -137,7 +138,8 @@ Your script reads the current item from `app.plugins.plugins.dropit.received`:
   created: '2026-09-29T07:30:00.000Z',
   batch: { id: 'b3k9x0', index: 2, count: 3 },   // null when sent on its own
   text: '',                  // the text or link; '' for files
-  meta: { filename: 'budget.png', mime: 'image/png' },   // also title / description for links
+  meta: { filename: 'budget.png', mime: 'image/png' },   // also title / description for links;
+                             // from: { url, title? }, the page it was sent from (browser extension)
   note: 'Inbox/09-29 15.30 Slides for the 3pm meeting.md',   // where it was written
   files: ['Inbox/budget.png'],                   // files saved to the vault for it
 }

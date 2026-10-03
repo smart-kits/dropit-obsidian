@@ -337,6 +337,131 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('commands run a second apart', timers.includes(1000));
   }
 
+  console.log('── Where it came from (the browser extension adds the page) ──');
+  {
+    const { renderText, noteTitle, payloadOf } = DropitPlugin;
+    const FROM = { url: 'https://example.com/post/1', title: 'A Post' };
+    const SRC = '— [A Post](https://example.com/post/1)';
+    const quote = (seq, raw, from = FROM, extra = {}) => text(seq, raw, { meta: { from }, ...extra });
+    const photo = (seq, filename, from, group) => blob(seq, filename, { meta: { filename, mime: 'image/png', ...(from ? { from } : {}), ...(group ? { group } : {}) } });
+
+    // O1
+    ok('text: the source a blank line below', renderText(quote(60, 'a quoted line')).join('\n') === `a quoted line\n\n${SRC}`, JSON.stringify(renderText(quote(60, 'a quoted line'))));
+    ok('no title → the host name', renderText(quote(60, 'x', { url: 'https://sub.example.org/a?b=1' })).at(-1) === '— [sub.example.org](https://sub.example.org/a?b=1)', renderText(quote(60, 'x', { url: 'https://sub.example.org/a?b=1' })).at(-1));
+    {
+      const { p, files } = await makePlugin();
+      serve({ 'GET /v1/pull': pages([quote(61, 'a quoted line')]) });
+      await p.sync(false);
+      const body = files.get('Inbox/09-17 08.00 a quoted line.md');
+      ok('…and that is how the note ends', body?.endsWith(`---\n\na quoted line\n\n${SRC}\n`), JSON.stringify(body));
+    }
+
+    // O2 — the same escaping as the CLI, for the source line and for a link with a title
+    const odd = (url, title) => renderText(quote(62, 'x', { url, title })).at(-1);
+    ok('brackets leave the title, line breaks become one space, other spacing stays',
+      odd('https://example.com/', 'A [b]\r\n  c]') === '— [A b c](https://example.com/)' && odd('https://example.com/', 'A  b') === '— [A  b](https://example.com/)', odd('https://example.com/', 'A [b]\r\n  c]'));
+    ok('a backslash in the title is doubled, so it can\'t swallow the bracket', odd('https://example.com/', 'C:\\') === '— [C:\\\\](https://example.com/)', odd('https://example.com/', 'C:\\'));
+    ok('an address with a space or ( ) goes in <…>', odd('https://example.com/a b(1)', 'T') === '— [T](<https://example.com/a b(1)>)'
+      && odd('https://en.wikipedia.org/wiki/Foo_(bar)', 'T') === '— [T](<https://en.wikipedia.org/wiki/Foo_(bar)>)', odd('https://example.com/a b(1)', 'T'));
+    ok('inside <…>, \\ < and > are escaped', odd('https://example.com/a<b>', 'T') === '— [T](<https://example.com/a\\<b\\>>)'
+      && odd('https://example.com/a\\b', 'T') === '— [T](<https://example.com/a\\\\b>)', odd('https://example.com/a<b>', 'T') + ' ' + odd('https://example.com/a\\b', 'T'));
+    ok('line breaks in the address are encoded', odd('https://example.com/a\r\nb', 'T') === '— [T](https://example.com/a%0D%0Ab)', odd('https://example.com/a\r\nb', 'T'));
+    ok('only http(s): anything else gets no source line',
+      ['javascript:alert(1)', 'file:///etc/passwd', 'not a url', '', ' https://example.com/', 'https://'].every((url) => renderText(quote(63, 'x', { url, title: 'T' })).join('\n') === 'x')
+      && renderText(quote(63, 'x', { title: 'T' })).join('\n') === 'x' && renderText(quote(63, 'x', 'https://example.com/')).join('\n') === 'x');
+    {
+      const link = (raw, title, kind = 'url') => renderText(text(64, raw, { kind, meta: { title } })).join('\n');
+      ok('a link with a title: same escaping for its text and address',
+        link('https://en.wikipedia.org/wiki/Foo_(bar)', 'Foo\nbar\\') === '[Foo bar\\\\](<https://en.wikipedia.org/wiki/Foo_(bar)>)', link('https://en.wikipedia.org/wiki/Foo_(bar)', 'Foo\nbar\\'));
+      ok('…decided by the text, not the kind', link('https://example.com/x', 'T', 'text') === '[T](https://example.com/x)'
+        && link('see https://example.com/x', 'T') === 'see https://example.com/x', link('see https://example.com/x', 'T'));
+      ok('…and a title that is only brackets is no title', link('https://example.com/x', '[]') === 'https://example.com/x', link('https://example.com/x', '[]'));
+    }
+
+    // O3 — the second file comes in a later pull
+    {
+      const { p, files } = await makePlugin();
+      const g = (i) => ({ id: 'bCCCCCCCC', i, n: 2 });
+      serve({ 'GET /v1/pull': pages([photo(64, 'one.png', FROM, g(1))], [photo(65, 'two.png', FROM, g(2))]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await p.sync(false);
+      await p.sync(false);
+      const body = files.get('Inbox/09-17 08.00 one.md');
+      ok('a batch from one page: both files, then one source line', body?.endsWith(`---\n\n![[one.png]]\n\n![[two.png]]\n\n${SRC}\n`)
+        && body.split('— [').length === 2, JSON.stringify(body));
+    }
+    {
+      const { p, files } = await makePlugin();
+      serve({ 'GET /v1/pull': pages([photo(66, 'solo.png', FROM)]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await p.sync(false);
+      ok('a single file: the file, then its source', files.get('Inbox/09-17 08.00 solo.md')?.endsWith(`![[solo.png]]\n\n${SRC}\n`), JSON.stringify(files.get('Inbox/09-17 08.00 solo.md')));
+    }
+
+    // O4
+    {
+      const { p, files } = await makePlugin();
+      const g = (i) => ({ id: 'bDDDDDDDD', i, n: 2 });
+      const OTHER = { url: 'https://other.example/img' };
+      serve({ 'GET /v1/pull': pages([photo(67, 'one.png', FROM, g(1)), photo(68, 'two.png', OTHER, g(2))]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await p.sync(false);
+      const body = files.get('Inbox/09-17 08.00 one.md');
+      ok('a batch from two pages: each file followed by its own source',
+        body?.endsWith(`---\n\n![[one.png]]\n\n${SRC}\n\n![[two.png]]\n\n— [other.example](https://other.example/img)\n`), JSON.stringify(body));
+    }
+    {
+      const { p, files } = await makePlugin();
+      const g = (i) => ({ id: 'bEEEEEEEE', i, n: 2 });
+      serve({ 'GET /v1/pull': pages([photo(69, 'one.png', FROM, g(1)), photo(70, 'two.png', FROM, g(2))]), 'GET /69': () => new Error('offline'), 'GET /70': () => ({ bytes: PNG_BYTES() }) });
+      await p.sync(false);
+      const note = 'Inbox/09-17 08.00 one.md';
+      ok('a failed download keeps its place above the shared source', /⚠️[^\n]*one\.png[^\n]*\n\n!\[\[two\.png\]\]\n\n— \[A Post\]/.test(files.get(note) ?? ''), JSON.stringify(files.get(note)));
+      serve({ 'GET /v1/pull': pages([photo(69, 'one.png', FROM, g(1)), photo(70, 'two.png', FROM, g(2))]), 'GET /': () => ({ bytes: PNG_BYTES() }), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+      await p.repull('all');
+      ok('…and pulling again swaps in the file, the source line staying put',
+        files.get(note)?.endsWith(`---\n\n![[one.png]]\n\n![[two.png]]\n\n${SRC}\n`), JSON.stringify(files.get(note)));
+    }
+
+    // O5 — what came before stays as it was
+    {
+      const { p, files } = await makePlugin();
+      const rich = text(71, 'https://example.com/a/b', { kind: 'url', meta: { title: 'A [great] page', description: 'line one\nline two' } });
+      serve({ 'GET /v1/pull': pages([rich, text(72, 'plain')]) });
+      await p.sync(false);
+      ok('a link with title and description: unchanged, no source line',
+        files.get('Inbox/09-17 08.00 A _great_ page.md')?.endsWith('---\n\n[A great page](https://example.com/a/b)\n\n> line one\n> line two\n'), JSON.stringify(files.get('Inbox/09-17 08.00 A _great_ page.md')));
+      ok('an item without meta: unchanged', files.get('Inbox/09-17 08.00 plain.md')?.endsWith('---\n\nplain\n'), JSON.stringify(files.get('Inbox/09-17 08.00 plain.md')));
+    }
+
+    // O6
+    {
+      const { p, files } = await makePlugin({ mode: 'append', appendPath: 'Inbox/dropit' });
+      const g = (i) => ({ id: 'bFFFFFFFF', i, n: 2 });
+      serve({ 'GET /v1/pull': pages([quote(73, 'a quoted line'), photo(74, 'one.png', FROM, g(1))], [photo(75, 'two.png', FROM, g(2)), text(76, 'after')]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await p.sync(false);
+      await p.sync(false);
+      const body = files.get('Inbox/dropit.md');
+      ok('append to a note: text and files carry their source',
+        body === `**09-17 08:00** · cli\na quoted line\n\n${SRC}\n\n**09-17 08:00** · web\n![[one.png]]\n![[two.png]]\n\n${SRC}\n\n**09-17 08:00** · cli\nafter\n`, JSON.stringify(body));
+    }
+    {
+      const { p, files } = await makePlugin({ mode: 'daily' });
+      serve({ 'GET /v1/pull': pages([quote(77, 'a quoted line')]) });
+      await p.sync(false);
+      const body = files.get('2026-09-29.md');
+      ok('append to the daily note: the source line too', body === `**09-17 08:00** · cli\na quoted line\n\n${SRC}\n`, JSON.stringify(body) + [...files.keys()]);
+    }
+
+    // O7
+    ok('the note is named after the text, not the page', noteTitle(quote(78, 'what I selected')) === '09-17 08.00 what I selected', noteTitle(quote(78, 'what I selected')));
+
+    // O8
+    const pl = payloadOf(quote(79, 'x'), 'Inbox/x.md', []);
+    ok('hook payload: meta.from, frozen, still v1', pl.v === 1 && pl.meta.from.url === FROM.url && pl.meta.from.title === 'A Post'
+      && [pl, pl.meta, pl.meta.from].every(Object.isFrozen), JSON.stringify(pl));
+    const noTitle = payloadOf(quote(80, 'x', { url: 'https://example.com/' }), 'Inbox/x.md', []);
+    ok('…without a title, only the url; without a source, no `from`', JSON.stringify(noTitle.meta.from) === '{"url":"https://example.com/"}'
+      && !('from' in payloadOf(text(81, 'x'), 'Inbox/x.md', []).meta), JSON.stringify(noTitle.meta));
+  }
+
   console.log('── A stale server address heals itself ──');
   {
     const { p } = await makePlugin({}, { token: 'dk_x', endpoint: 'https://old.example.com' });

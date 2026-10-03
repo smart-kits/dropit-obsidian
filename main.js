@@ -631,10 +631,12 @@ const DropitPlugin = class DropitPlugin extends Plugin {
         this.settings.missingAt[item.seq] = { path: dest.path, line: lines[0] };
       }
     } else {
-      lines = renderText(item);
+      lines = renderBody(item);
     }
     if (dest.kind === 'append' && !missing) addToRanges(this.settings.appended, item.seq);
-    await vault.process(file, (s) => joinBlock(s, lines, dest.kind === 'note' ? '\n\n' : '\n'));
+    // The source line goes in even when the download failed: pulling again swaps only the warning line.
+    const gap = dest.kind === 'note' ? '\n\n' : '\n';
+    await vault.process(file, (s) => withSource(s, lines, gap, sourceLine(item), !!groupOf(item)));
     if (dest.kind === 'note') {
       await fileManager.processFrontMatter(file, (fm) => addSeq(fm, missing ? 'dropit_missing' : 'dropit_seq', item.seq));
     }
@@ -1188,15 +1190,56 @@ function topic(item) {
     .replace(/^\d+\.\s+/, '');
 }
 
-/** Text as sent. A link with a title (the browser extension sends one) shows the title and description. */
+/** Text as sent, with its source line below when it has one. */
 function renderText(item) {
+  const src = sourceLine(item);
+  return src ? [renderBody(item).join('\n').trimEnd(), '', src] : renderBody(item);
+}
+
+/** Text as sent. A lone http(s) address with a title (the browser extension sends one) shows the title and description. */
+function renderBody(item) {
   const raw = String(item.raw ?? '');
-  const title = item.meta?.title;
-  if (!title || !/^https?:\/\/\S+$/i.test(raw.trim())) return [raw];
-  const lines = [`[${title.replace(/[[\]]/g, '')}](${raw.trim()})`];
+  const url = raw.trim();
+  const title = linkText(item.meta?.title);
+  if (!title || !/^https?:\/\/\S+$/i.test(url)) return [raw];   // by the text, not by kind
+  const lines = [`[${title}](${linkTarget(url)})`];
   const desc = String(item.meta?.description ?? '').trim();
-  if (desc) lines.push('', ...desc.split('\n').map((l) => `> ${l}`));
+  if (desc) lines.push('', ...desc.split(/\r?\n/).map((l) => `> ${l}`.trimEnd()));
   return lines;
+}
+
+/** Link text: no brackets or line breaks; a backslash is escaped so it can't swallow the closing `]`. */
+const linkText = (s) => String(s ?? '').replace(/[[\]]/g, '').replace(/\s*[\r\n]+\s*/g, ' ').trim()
+  .replace(/\\/g, '\\\\');
+
+/** Link target: wrapped in <…> when it has spaces, brackets or backslashes, which would end or bend a bare one. */
+function linkTarget(url) {
+  const u = url.replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  return /[\s()<>\\]/.test(u) ? `<${u.replace(/[\\<>]/g, '\\$&')}>` : u;
+}
+
+/**
+ * `— [Page title](https://…)`: the page a selection, image or file was sent from (the browser extension
+ * adds it). No title → the site's host name. Only http(s) addresses; anything else gets no line.
+ */
+function sourceLine(item) {
+  const url = item.meta?.from?.url;
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return null;
+  let host;
+  try { host = new URL(url).hostname; } catch { return null; }
+  if (!host) return null;
+  return `— [${linkText(item.meta.from.title) || linkText(host)}](${linkTarget(url)})`;
+}
+
+/**
+ * Append lines, and the source line a blank line below them. Members of one batch sent from the same
+ * page share one source line: when the note already ends with it, the new lines go above it.
+ */
+function withSource(s, lines, gap, src, shared) {
+  if (!src) return joinBlock(s, lines, gap);
+  let head = s.replace(/\s+$/, '');
+  if (shared && (head === src || head.endsWith(`\n${src}`))) head = head.slice(0, -src.length);
+  return `${joinBlock(head, lines, gap).replace(/\s+$/, '')}\n\n${src}\n`;
 }
 
 function missingLine(item, err) {
@@ -1228,6 +1271,8 @@ function payloadOf(item, note, files) {
   const g = groupOf(item);
   const meta = {};
   for (const k of ['filename', 'mime', 'title', 'description']) if (item.meta?.[k] != null) meta[k] = item.meta[k];
+  const from = item.meta?.from;
+  if (from && typeof from.url === 'string') meta.from = Object.freeze({ url: from.url, ...(from.title != null ? { title: from.title } : {}) });
   // Frozen all the way down: every listener and command gets the same object, and one can't change it for the next.
   return Object.freeze({
     v: 1,
@@ -1787,4 +1832,4 @@ class Confirm extends Modal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { STRINGS, QR, noteTitle, renderText, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });
+Object.assign(module.exports, { STRINGS, QR, noteTitle, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });
