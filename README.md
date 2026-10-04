@@ -2,129 +2,120 @@
 
 **English** · [简体中文](./README.zh-CN.md)
 
-Everything you send to dropit — from your phone, browser or terminal — lands in your vault, in real
-time. And anything in your vault goes out to your other devices with a right-click.
+**What you send from your phone, your browser or your terminal lands in your vault as notes —
+titled, images embedded, sources linked. And anything in your vault goes out with a right-click.**
 
-dropit delivers; what happens next is up to you. If you want more — summaries, tags, filing — the
-plugin can hand each item to a command of your own choosing, and stays out of it (see [Run your own
-command](#run-your-own-command)).
+Desktop and mobile. Part of [dropit](https://github.com/smart-kits/dropit-client), a private pipe between your own devices.
 
-## At a glance
+## What it's like
 
-- **Receives** whatever you send to dropit from any device — text, links, photos, videos, files — as notes in your vault, with the files embedded.
-- **Sends** from Obsidian: select text → right-click → *Send to dropit*; or right-click a note or several files in the file list → *Send to dropit*.
-- To send from your phone, browser or terminal, see [what each dropit client can send, and how](https://github.com/smart-kits/dropit-client#what-can-i-send-and-how).
-
-## Features
-
-- **Real-time.** New items appear seconds after you send them. The status bar shows it: **● dropit** receiving live, **○ dropit** not.
-- **Catches up.** Obsidian was closed for two days, or the laptop slept? Everything sent meanwhile arrives when Obsidian opens or when you come back to it. No polling timer.
-- **One delivery, one note.** Text and files sent together become one note — the text on top, the files embedded below.
-- **Readable names.** Notes are named after their time and content (`09-29 15.30 Slides for the 3pm meeting.md`); links with a page title (from the browser extension) show the title, the link and the description.
-- **Where it came from.** Selections, images and files sent from a web page with the browser extension get one line below them: `— [Page title](https://…)`. Several files from the same page share one line.
-- **Files where you keep attachments.** Saved with their original names, where *Settings → Files and links* says attachments go.
-- **Three places to write.** A new note for each delivery, the end of one note you choose, or today's daily note.
-- **Send from Obsidian.** Right-click selected text, a note or files → *Send to dropit*. Or use the commands.
-- **Never loses an item, never writes one twice.** Progress advances only after a note is written. Pulling again skips what's already in the vault.
-- **Never stuck.** If a file can't be downloaded, a one-line warning takes its place and everything after it still arrives; pulling again later swaps the warning for the file.
-- **Heals itself.** If the server address stops answering, the built-in one is tried next.
-- **Desktop and mobile.** No build step, plain CommonJS.
-
-## Let your AI install it
-
-Using an AI coding agent (Claude Code, Codex, Cursor, …)? Paste this:
-
-```text
-Install the dropit plugin into my Obsidian vault by following
-https://raw.githubusercontent.com/smart-kits/dropit-obsidian/main/AGENTS.md
-Ask me which vault and before creating an account, and never show or commit my token.
-```
-
-The agent finds your vault, installs and enables the plugin, and tells you exactly what to
-click to pair it. Instructions for agents are in [AGENTS.md](./AGENTS.md).
-
-## Install
-
-Not yet in the Community Plugins directory. Install it manually:
-
-```bash
-git clone https://github.com/smart-kits/dropit-obsidian.git \
-  "<your vault>/.obsidian/plugins/dropit"
-```
-
-Or download `main.js`, `manifest.json` and `styles.css` into `<your vault>/.obsidian/plugins/dropit/`.
-
-Then: *Settings → Community plugins* → enable **dropit**.
-
-## First run
-
-Open *Settings → dropit*. It opens on *Join with a pairing code*:
-
-- **Already using dropit** → enter the 6-character code from another device → *Join*
-- **First device** → *First time using dropit?* → *Create a new account*
-
-To add another device later: *Settings → dropit → Add a device → Generate a pairing code*. Type the
-code on the new device, or scan the QR code with its camera. The page notices when the device joins.
-
-## Where items go
-
-Choose under *Settings → dropit → Write items to*.
-
-**A new note for each** (default). One note per delivery, in the folder you set (default `Inbox`):
-
-```markdown
----
-kind: batch
-source: web
-created: 2026-09-29T07:30:00.000Z
-dropit_batch: b3k9x0
-dropit_seq: [41, 42, 43]
----
-
-Slides for the 3pm meeting
-
-![[budget.png]]
-
-![[timeline.pdf]]
-```
-
-A single item carries `dropit_seq: 42`; `kind` is `text`, `url`, `image`, `file` …, or `batch` for
-several sent together.
-
-**The end of one note.** Each item is added to the note you name (created if missing):
-
-```markdown
-**09-29 15:30** · ios-shortcut
-Call the dentist back
-```
-
-**Today's daily note.** Same format, added to the end of today's note — using the folder, date
-format and template of the core *Daily notes* plugin. If today's note doesn't exist yet it's created
-from that template; a template written for Templater goes through Templater.
-
-Nothing else is added to the note. The plugin remembers which items it appended, so pulling again
-skips them — including one you've since deleted from the note on purpose.
-
-## Send to dropit
-
-| From | How |
+| Somewhere else, you… | In your vault, a few seconds later |
 |---|---|
-| Selected text | Right-click → *Send to dropit*, or the command *dropit: Send selection* |
-| A note | Right-click it in the file list → *Send to dropit*, or *dropit: Send current note*. It goes as text; a note over 1 MB goes as a file |
-| Files | Right-click one or several → *Send to dropit*. Several at once arrive together, as one delivery |
+| Share a photo from your iPhone | A note named `10-04 15.30 IMG_2041`, the photo embedded, saved where your attachments go |
+| Send a web page from Chrome | `[The article's title](link)` with the author's summary as a quote — not a bare URL |
+| Select a paragraph in the browser and send it | The paragraph, and under it `— [Page title](link)`, so you always know where it came from |
+| Send some text and three screenshots at once | **One** note: the text on top, the three images below |
+| Type `dropit send "call the bank"` in a terminal | A note that says *call the bank* |
+| Close the laptop for a weekend | Everything sent meanwhile, the moment you open Obsidian again — nothing missing, nothing twice |
 
-What you send from this vault doesn't come back into it.
+And the other way: right-click a note, a PDF or a few images in the file list → *Send to dropit*,
+and they're on your phone.
 
-## Run your own command
+## Where things land
+
+Pick once in *Settings → dropit → Write items to*:
+
+| Choice | What you get |
+|---|---|
+| **A new note for each** (default) | One note per delivery in a folder you choose (`Inbox`), named by time and what it's about |
+| **The end of one note** | Everything appended to a single note (`Inbox/dropit.md`), each under a time line |
+| **Today's daily note** | Appended to today's daily note — your folder, date format and template from the *Daily notes* plugin; Templater templates are handed to Templater |
+
+Files — images, videos, PDFs — are saved where Obsidian puts attachments (*Settings → Files and links*)
+and embedded with your own link style, wikilinks or Markdown.
+
+### A new note for each
+
+```markdown
+---
+kind: url
+source: chrome-extension
+created: 2026-10-04T07:30:00.000Z
+dropit_seq: 42
+---
+
+[How Airmail Worked](https://example.com/airmail)
+
+> A short history of the red-and-blue envelope.
+```
+
+The file name is the time plus what it's about: `10-04 15.30 How Airmail Worked`. A link without a title
+becomes `example.com/airmail`; text becomes its first line; a file its own name.
+Things sent together share one note — text on top, files embedded below.
+
+### The end of one note, or today's daily note
+
+```markdown
+**10-04 15:30** · ios-shortcut
+![[IMG_2041.jpeg]]
+
+**10-04 15:42** · chrome-extension
+A paragraph worth keeping.
+
+— [Page title](https://example.com/page)
+```
+
+Note: the daily note is the one for the day the item is **written**. Items caught up after a few days
+offline go into today's note, not the day they were sent.
+
+## Sending from your vault
+
+| Where | What goes out |
+|---|---|
+| Select text in a note → right-click → *Send to dropit* | The selected text (a lone link is sent as a link) |
+| Right-click a file in the file list → *Send to dropit* | A note goes as its Markdown text; any other file as the file itself |
+| Select several files → right-click → *Send N files to dropit* | Up to 16 files, arriving together as one delivery |
+| Command palette: *dropit: Send current note* · *dropit: Send selection* | The same, from the keyboard — bind them to hotkeys under *Settings → Hotkeys* |
+
+A note goes as its text, front matter included; images embedded in it aren't sent along — select them
+in the file list too. What you send from this vault is never written back into it.
+
+## The status bar
+
+One glance tells you the state; click it to sync now.
+
+| Shows | Means |
+|---|---|
+| `● dropit` | Receiving in real time (hover for the days left of a trial) |
+| `◌ dropit` | Connecting |
+| `↻ dropit` | Syncing |
+| `○ dropit` | No real-time on your plan right now: syncs when Obsidian opens or you come back to it |
+| `○ dropit · offline` | Disconnected — reconnecting by itself |
+| `⚠ dropit` | Something failed — hover for why; it tries again by itself (5 s, 15 s, then every minute) |
+| `dropit · not paired` | Click to set it up |
+
+When items arrive, one notice says how many — click it to open the last one.
+
+## Nothing missed, nothing twice
+
+- **Coming back catches up.** Open Obsidian, or switch back to it, and whatever arrived meanwhile is written.
+- **A flaky network is ridden out.** A connection dropped on the way (a proxy, patchy Wi-Fi) is tried again
+  before it counts; a failed sync retries on its own.
+- **A file that won't download doesn't block the rest.** A line takes its place:
+  `⚠️ report.pdf (820 KB) couldn't be downloaded: … Settings → dropit → Pull again tries once more.`
+- **Pull again** (*Settings → dropit*): everything, the last N items, or the last N days. What's already in
+  the vault is skipped, failed downloads are fetched again. With *A new note for each*, a note you deleted
+  comes back; in the other two modes, what you deleted stays deleted.
+- A newly joined device starts with what's sent after it joined; *Pull again* fetches what came before,
+  for as long as your plan keeps items.
+
+## Run your own command after each item
 
 *Settings → dropit → Run a command after receiving* picks any Obsidian command — a QuickAdd macro, a
-Templater script, another plugin's action. It runs once for each item, **after** the item is in
-the vault.
+Templater script, another plugin's action. It runs once for each item, **after** the item is in the vault.
 
-The contract:
-
-- **Delivery never depends on it.** The item is written first; the command runs afterwards, once, with no retry. If it fails, nothing is undone and nothing is re-sent.
-- **One item at a time.** Items are handed over in order, a second apart.
+- **Delivery never depends on it.** The item is written first; the command runs afterwards, once, with no retry.
+- **One item at a time**, a second apart.
 - **dropit defines the format; your script is yours.** The plugin does nothing with the content beyond writing it.
 
 Your script reads the current item from `app.plugins.plugins.dropit.received`:
@@ -145,8 +136,8 @@ Your script reads the current item from `app.plugins.plugins.dropit.received`:
 }
 ```
 
-`app.plugins.plugins.dropit.recent` holds the last 20. From another plugin or a startup script you
-can also listen directly — every item, no command needed:
+`app.plugins.plugins.dropit.recent` holds the last 20. From another plugin or a startup script you can also
+listen directly — every item, no command needed:
 
 ```js
 app.workspace.on('dropit:received', (item) => { /* same object */ });
@@ -167,44 +158,64 @@ module.exports = async ({ app }) => {
 > command line out of it: pass it to a program on **stdin** or in a file. The object is frozen, so a
 > script can't change what the next one sees.
 
+## Set up
+
+1. **Install.** Not in the Community Plugins directory yet. Either download it from
+   [dropit.smart-kits.xyz](https://dropit.smart-kits.xyz) and unzip it into `<your vault>/.obsidian/plugins/`,
+   or clone it there:
+
+   ```bash
+   git clone https://github.com/smart-kits/dropit-obsidian.git "<your vault>/.obsidian/plugins/dropit"
+   ```
+
+   Then *Settings → Community plugins* → enable **dropit**.
+2. **Join.** *Settings → dropit* opens on *Join with a pairing code*. On a device you already use, show a
+   code (web inbox: *Devices*; terminal: `dropit code`), type its 6 characters, press *Join*.
+   Your first device ever? *First time using dropit? → Create a new account*.
+3. **Add your other devices from here.** *Settings → dropit → Add a device → Generate a pairing code*:
+   type the code on the new device, or scan the QR code with its camera. The code is copied for you,
+   and the page notices when the device has joined.
+
+Using an AI coding agent (Claude Code, Codex, Cursor…)? Paste this and it installs the plugin for you:
+
+```text
+Install the dropit plugin into my Obsidian vault by following
+https://raw.githubusercontent.com/smart-kits/dropit-obsidian/main/AGENTS.md
+Ask me which vault and before creating an account, and never show or commit my token.
+```
+
 ## Settings
 
 | Setting | What it does |
 |---|---|
-| *(top line)* | Whether it's receiving live, your plan, devices and space used — and *Sync now* |
-| Write items to · Folder · Note | Where items go (above) |
-| Run a command after receiving | Your command (above) |
-| Pull again | Pulls again: **everything**, **the last N items**, or **the last N days**. What's already in the vault is skipped; downloads that failed are tried again |
-| Add a device | A pairing code and QR code for a new device |
-| Devices | Every device on your account; remove the ones you don't use |
-| Feedback | *Report a problem* opens a new issue on GitHub with the plugin and Obsidian versions filled in; *Source code* opens this repository. Issues are public: never paste your token |
-| Advanced → Server address | Rarely needs changing. If it stops answering, the built-in address is tried next |
-| Advanced → Unpair | Clears this device's settings. Your items and other devices are untouched |
+| *(top line)* | The connection state and your account: plan · devices · space · how long items are kept. *Sync now* next to it |
+| Write items to · Folder · Note | Where items land (above) |
+| Run a command after receiving | Your command, or none |
+| Pull again | Everything · the last N items · the last N days |
+| Add a device | A pairing code and its QR code |
+| Devices | Every device on your account; *Remove* stops one right away |
+| Feedback | *Report a problem* (a new public issue with your versions filled in) · *Source code* |
+| Advanced → Server address | Only if you were given another address; the built-in one is always tried last |
+| Advanced → Unpair | Forgets this vault's sign-in; your settings stay |
 
-Sync by hand any time: click the status bar item or the ribbon icon, or run *dropit: Sync now*.
-
-## How it stays connected
-
-- Real-time push over a WebSocket. A heartbeat every 60 s detects dead connections — after sleep/wake a socket often looks open but receives nothing — and reconnects with backoff from 1 s up to 60 s.
-- Coming back to the Obsidian window syncs when the connection isn't known to be live.
-- If real-time push isn't included in your plan (new accounts get it for 10 days), the plugin says so once and stops asking; it syncs when Obsidian opens, when you come back to it, and when you sync by hand.
+The interface follows Obsidian's language: English, or Simplified Chinese when Obsidian is set to Chinese.
 
 ## When something goes wrong
 
-| Status bar / notice | Meaning | What to do |
+| You see | It means | Do this |
 |---|---|---|
-| `○ dropit · offline` | Disconnected, reconnecting | Wait, or click it to sync now |
-| `⚠ dropit` | The last sync failed — hover for why | Click it to try again |
-| `Invalid token` / `This device was removed` | The token is invalid or this device was removed | *Advanced → Unpair*, then join again with a new code |
-| `Device limit reached` | Your plan's device limit | Remove an unused device under *Devices* |
-| `Can't reach the server` | Network problem | Check your connection; the built-in address is tried automatically |
-
-Details are in the developer console, under `[dropit]`.
+| `⚠ dropit` · *Can't reach the server* | The network or a proxy is dropping connections | Usually nothing — it retries. If it stays, check the proxy, or let it connect to dropit directly |
+| *Invalid token* · *This device was removed* | This vault was removed from your account | Join again with a new code |
+| *Device limit reached* | Your plan's device count is used up | Remove a device you no longer use (*Settings → dropit → Devices*) |
+| *Pairing code expired* | Codes last 5 minutes and work once | Generate a new one |
+| *Real-time trial ended* | New accounts get real-time for a while; after that it syncs when you open or come back to Obsidian | Nothing to fix — click the status bar to sync any time |
+| `⚠️ … couldn't be downloaded` in a note | The file didn't come down this time | *Settings → dropit → Pull again* |
 
 ## Privacy
 
-- The token is stored in this plugin's `data.json` inside your vault. **If you sync or publish your vault, exclude `.obsidian/plugins/dropit/data.json`.**
-- Unpairing clears it from this device.
+- The sign-in is stored in this plugin's `data.json` inside your vault. **If you sync or publish your vault,
+  exclude `.obsidian/plugins/dropit/data.json`.** *Unpair* clears it.
+- Each device has its own key and can be removed on its own; removing one frees its slot at once.
 
 ## Development
 
@@ -215,8 +226,6 @@ brew install gitleaks && git config core.hooksPath .githooks   # block tokens fr
 ```
 
 Commit messages are in English. Docs come in pairs — please update both `README.md` and `README.zh-CN.md`.
-
-The interface follows your language: English by default, Simplified Chinese when Obsidian is set to Chinese.
 
 ## License
 
