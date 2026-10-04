@@ -462,6 +462,43 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       && !('from' in payloadOf(text(81, 'x'), 'Inbox/x.md', []).meta), JSON.stringify(noTitle.meta));
   }
 
+  console.log('── A flaky connection (dropped by a proxy) ──');
+  {
+    const { p } = await makePlugin();
+    p.settings.endpoints = [];
+    let pulls = 0;
+    const calls = serve({
+      'GET /v1/pull': () => (++pulls <= 2 ? new Error('net::ERR_CONNECTION_CLOSED') : { json: { items: [], has_more: false, next_after: 0 } }),
+      'POST /v1/accounts': () => new Error('net::ERR_CONNECTION_CLOSED'),
+    });
+    timers.length = 0;
+    await p.sync(false);
+    ok('a dropped connection is tried again on the same address, and gets through', pulls === 3 && p.state !== 'error', `${pulls} · ${p.state}`);
+    ok('…after short waits', timers.includes(400) && timers.includes(1200), JSON.stringify(timers));
+
+    calls.length = 0;
+    let err = null;
+    try { await p.api('POST', '/v1/accounts', { device_name: 'x' }, false); } catch (e) { err = e; }
+    ok('creating an account is never sent twice (a lost answer would make a second account)',
+      err && calls.filter((c) => c.path === '/v1/accounts').length === 1, String(calls.length));
+
+    // A sync that still fails doesn't sit on "⚠": it tries again by itself, backing off
+    const q = (await makePlugin()).p;
+    q.settings.endpoints = [];
+    let down = true, tries = 0;
+    serve({ 'GET /v1/pull': () => { tries++; return down ? new Error('net::ERR_CONNECTION_CLOSED') : { json: { items: [], has_more: false, next_after: 0 } }; } });
+    window.setTimeout = (fn, ms) => { timers.push(ms); if (ms !== 5_000) setImmediate(fn); else held = fn; return 0; };
+    let held = null;
+    timers.length = 0;
+    await q.sync(false);
+    ok('a failed sync shows the error and schedules a retry in 5 s', q.state === 'error' && timers.includes(5_000) && held, `${q.state} · ${JSON.stringify(timers)}`);
+    down = false;
+    held();
+    for (let i = 0; i < 5; i++) await settle();
+    window.setTimeout = (fn, ms) => { timers.push(ms); setImmediate(fn); return 0; };
+    ok('…which heals it once the network is back', q.state !== 'error' && q.syncFails === 0, `${q.state} · ${q.syncFails}`);
+  }
+
   console.log('── A stale server address heals itself ──');
   {
     const { p } = await makePlugin({}, { token: 'dk_x', endpoint: 'https://old.example.com' });

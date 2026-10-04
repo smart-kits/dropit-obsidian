@@ -14,6 +14,12 @@ const {
 } = obsidian;
 
 const DEFAULT_ENDPOINT = 'https://dropit.smart-kits.xyz';
+// Retrying a dropped connection: these waits, then the next address
+const RETRY_MS = [400, 1200];
+// A failed sync tries again by itself after these waits (the last one repeats)
+const SYNC_RETRY_MS = [5_000, 15_000, 60_000];
+/** Safe to send twice: reads, a ticket, a cursor reset, and sends (the server recognizes a repeat within a minute) */
+const retriable = (method, path) => method === 'GET' || /^\/v1\/(ws\/ticket|cursor\/reset|ingest)/.test(path);
 const REPO = 'https://github.com/smart-kits/dropit-obsidian';
 
 const DEFAULTS = {
@@ -423,6 +429,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       this.unloaded = true;
       window.clearTimeout(this.reconnectTimer);
       window.clearTimeout(this.retryTimer);
+      window.clearTimeout(this.syncRetryTimer);
       this.socket?.close();
     });
 
@@ -507,6 +514,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
         hasMore = page.has_more;
       }
       this.error = null;
+      this.syncFails = 0;
+      window.clearTimeout(this.syncRetryTimer);
       this.setStatus(this.liveState());
       if (ctx.written.length) this.announce(ctx.written);
       else if (verbose) new Notice(t.nothingNew);
@@ -516,6 +525,10 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       console.error('[dropit] sync', err);
       this.error = err.message;
       this.setStatus('error');
+      // Don't sit on "⚠" until a push, a focus or a click: try again by itself, backing off
+      this.syncFails = (this.syncFails ?? 0) + 1;
+      window.clearTimeout(this.syncRetryTimer);
+      if (!this.unloaded) this.syncRetryTimer = window.setTimeout(() => this.sync(false), SYNC_RETRY_MS[Math.min(this.syncFails, SYNC_RETRY_MS.length) - 1]);
       if (verbose) new Notice(`dropit: ${err.message}`);
     }
     return ctx.written.length;
@@ -1108,18 +1121,24 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     let lastErr;
     for (const base of list) {
       let res;
-      try {
-        res = await requestUrl({
-          url: base + path,
-          method,
-          throw: false,
-          headers: auth ? { authorization: `Bearer ${this.settings.token}` } : {},
-          ...(body ? { contentType: 'application/json', body: JSON.stringify(body) } : {}),
-        });
-      } catch (err) {
-        lastErr = err;
-        continue;
+      // A connection dropped on the way (a flaky proxy: net::ERR_CONNECTION_CLOSED) is tried again on the same
+      // address before giving up on it — but only requests that are safe to send twice
+      for (let attempt = 0; !res; attempt++) {
+        try {
+          res = await requestUrl({
+            url: base + path,
+            method,
+            throw: false,
+            headers: auth ? { authorization: `Bearer ${this.settings.token}` } : {},
+            ...(body ? { contentType: 'application/json', body: JSON.stringify(body) } : {}),
+          });
+        } catch (err) {
+          lastErr = err;
+          if (attempt >= RETRY_MS.length || !retriable(method, path)) break;
+          await new Promise((r) => window.setTimeout(r, RETRY_MS[attempt]));
+        }
       }
+      if (!res) continue;
       if (base !== list[0]) {
         this.settings.endpoints = [base, ...list.filter((e) => e !== base && e !== DEFAULT_ENDPOINT)];
         await this.save();
