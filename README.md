@@ -74,7 +74,7 @@ offline go into today's note, not the day they were sent.
 |---|---|
 | Select text in a note → right-click → *Send to dropit* | The selected text (a lone link is sent as a link) |
 | Right-click a file in the file list → *Send to dropit* | A note goes as its Markdown text; any other file as the file itself |
-| Select several files → right-click → *Send N files to dropit* | Up to 16 files, arriving together as one delivery |
+| Select several files → right-click → *Send N files to dropit* | Up to 10 files, arriving together as one delivery |
 | Command palette: *dropit: Send current note* · *dropit: Send selection* | The same, from the keyboard — bind them to hotkeys under *Settings → Hotkeys* |
 
 A note goes as its text, front matter included; images embedded in it aren't sent along — select them
@@ -91,7 +91,7 @@ One glance tells you the state; click it to sync now.
 | `↻ dropit` | Syncing |
 | `○ dropit` | No real-time on your plan right now: syncs when Obsidian opens or you come back to it |
 | `○ dropit · offline` | Disconnected — reconnecting by itself |
-| `⚠ dropit` | Something failed — hover for why; it tries again by itself (5 s, 15 s, then every minute) |
+| `⚠ dropit` | Something failed — hover for why; it tries again by itself (5 s, 15 s, then every minute). If this vault was removed from your account, it stops trying until you pair again or click to sync |
 | `dropit · not paired` | Click to set it up |
 
 When items arrive, one notice says how many — click it to open the last one.

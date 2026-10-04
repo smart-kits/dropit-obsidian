@@ -18,6 +18,9 @@ const DEFAULT_ENDPOINT = 'https://dropit.smart-kits.xyz';
 const RETRY_MS = [400, 1200];
 // A failed sync tries again by itself after these waits (the last one repeats)
 const SYNC_RETRY_MS = [5_000, 15_000, 60_000];
+// …except when the server says this vault's key no longer works: asking again can't fix that. Wait for a new
+// pairing or a sync by hand.
+const AUTH_LOST = new Set(['INVALID_TOKEN', 'DEVICE_REVOKED']);
 /** Safe to send twice: reads, a ticket, a cursor reset, and sends (the server recognizes a repeat within a minute) */
 const retriable = (method, path) => method === 'GET' || /^\/v1\/(ws\/ticket|cursor\/reset|ingest)/.test(path);
 const REPO = 'https://github.com/smart-kits/dropit-obsidian';
@@ -47,7 +50,7 @@ const HOOK_GAP_MS = 1_000;        // between two runs of the user's command
 const DAY_MS = 86_400_000;
 const BATCH_KEEP_MS = 86_400_000; // a batch's later items arrive within seconds; a day is plenty
 const ENDPOINTS_CHECK_MS = 86_400_000;
-const MAX_SEND_FILES = 16;
+const MAX_SEND_FILES = 10;
 const SENT_KEEP = 200;
 const MISSING_KEEP = 500;
 const TEXT_MAX_BYTES = 1_000_000;
@@ -164,6 +167,7 @@ const STRINGS = {
     hookClear: 'Clear',
     hookPlaceholder: 'Search commands',
     hookMissing: (id) => `Command not found: ${id}`,
+    hookNotRun: (id) => `Command didn't run (its conditions weren't met): ${id}`,
     repull: 'Pull again',
     repullDesc: (seq) => `Received up to #${seq}. Items already in the vault are skipped; downloads that failed are tried again.`,
     repullAll: 'Everything',
@@ -299,6 +303,7 @@ const STRINGS = {
     hookClear: '清除',
     hookPlaceholder: '搜索命令',
     hookMissing: (id) => `找不到命令：${id}`,
+    hookNotRun: (id) => `命令没有运行（它的前提条件不满足）：${id}`,
     repull: '重新拉取',
     repullDesc: (seq) => `已收到 #${seq}。vault 里已有的不会重复写；之前下载失败的会重新下载。`,
     repullAll: '全部',
@@ -474,6 +479,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       if (verbose) new Notice(t.notPaired);
       return Promise.resolve(0);
     }
+    // Removed from the account: pushes, focus and timers stay quiet; a sync by hand (or pull again) still asks
+    if (this.authLost && !verbose && !opts.since) return Promise.resolve(0);
     // While sending, a push for our own item can arrive before we know its seq: hold the sync until then.
     if (this.sendDepth && !verbose && !opts.since) {
       this.heldSync = true;
@@ -513,22 +520,27 @@ const DropitPlugin = class DropitPlugin extends Plugin {
         await this.save();
         hasMore = page.has_more;
       }
+      const wasLost = !!this.authLost;
       this.error = null;
+      this.authLost = null;
       this.syncFails = 0;
       window.clearTimeout(this.syncRetryTimer);
       this.setStatus(this.liveState());
       if (ctx.written.length) this.announce(ctx.written);
       else if (verbose) new Notice(t.nothingNew);
-      // Syncing by hand is also when real-time gets another try — e.g. right after upgrading.
+      // Syncing by hand is also when real-time gets another try — e.g. right after upgrading, or once the key works again.
       if (verbose && this.noRealtime) { this.noRealtime = false; this.connect(); }
+      else if (wasLost) this.connect();
     } catch (err) {
       console.error('[dropit] sync', err);
       this.error = err.message;
       this.setStatus('error');
-      // Don't sit on "⚠" until a push, a focus or a click: try again by itself, backing off
       this.syncFails = (this.syncFails ?? 0) + 1;
       window.clearTimeout(this.syncRetryTimer);
-      if (!this.unloaded) this.syncRetryTimer = window.setTimeout(() => this.sync(false), SYNC_RETRY_MS[Math.min(this.syncFails, SYNC_RETRY_MS.length) - 1]);
+      // Removed from the account: stay on "⚠" with the reason; retrying can't help
+      if (AUTH_LOST.has(err.code)) this.loseAuth(err.code);
+      // Otherwise don't sit on "⚠" until a push, a focus or a click: try again by itself, backing off
+      else if (!this.unloaded) this.syncRetryTimer = window.setTimeout(() => this.sync(false), SYNC_RETRY_MS[Math.min(this.syncFails, SYNC_RETRY_MS.length) - 1]);
       if (verbose) new Notice(`dropit: ${err.message}`);
     }
     return ctx.written.length;
@@ -773,7 +785,12 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       this.app.workspace.trigger('dropit:received', payload);
       if (!id) return;
       const ran = this.app.commands?.executeCommandById?.(id);
-      if (ran === false) console.warn(`[dropit] ${t.hookMissing(id)}`);
+      // false means either there's no such command, or it exists but declined to run (its own check
+      // failed, e.g. it needs an open editor). Say which: "not found" for a command that's there misleads.
+      if (ran === false) {
+        const exists = !!this.app.commands?.findCommand?.(id);
+        console.warn(`[dropit] ${exists ? t.hookNotRun(id) : t.hookMissing(id)}`);
+      }
       await new Promise((r) => window.setTimeout(r, HOOK_GAP_MS));
     }).catch((err) => console.error('[dropit] hook', err));
   }
@@ -783,7 +800,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   async connect() {
     // One attempt at a time; one stuck for 30 s (a ticket request that never answers) doesn't block the next
     if (this.socket || (this.connecting && Date.now() - this.connectingAt < 30_000)) return;
-    if (!this.settings.token || this.unloaded || this.noRealtime) return;
+    if (!this.settings.token || this.unloaded || this.noRealtime || this.authLost) return;
     // "Connecting", not "disconnected": from the ticket request until the socket opens or fails
     this.connecting = true;
     this.connectingAt = Date.now();
@@ -828,9 +845,21 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       // 403 WS_REQUIRES_PAID: real-time isn't available — the trial is over, or today's spots are full.
       if (err.code === 'WS_REQUIRES_PAID') return void await this.stopRealtime(err.data?.reason ?? null);
       console.error('[dropit] ws', err);
+      if (AUTH_LOST.has(err.code)) {
+        this.error = err.message;
+        this.loseAuth(err.code);
+        return void this.setStatus('error');
+      }
       if (this.state !== 'error') this.setStatus('offline');
       this.scheduleReconnect();
     }
+  }
+
+  /** The key was refused (removed from the account): stop every automatic retry until a new pairing or a sync by hand. */
+  loseAuth(code) {
+    this.authLost = code;
+    window.clearTimeout(this.syncRetryTimer);
+    window.clearTimeout(this.reconnectTimer);
   }
 
   /**
@@ -901,7 +930,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   /** Exponential backoff, capped at 60 s */
   scheduleReconnect() {
-    if (this.unloaded || this.noRealtime) return;
+    if (this.unloaded || this.noRealtime || this.authLost) return;
     const delay = BACKOFF_MS[Math.min(this.retry++, BACKOFF_MS.length - 1)];
     window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
@@ -1084,7 +1113,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   async adopt({ token, device_id }) {
     Object.assign(this.settings, { token, device_id, cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {},
       noRealtimeNoticed: false, trialEndingNoticed: false, fullNoticedDay: null });
-    Object.assign(this, { noRealtime: false, realtimeWhy: null, realtimeUntil: null });
+    Object.assign(this, { noRealtime: false, realtimeWhy: null, realtimeUntil: null, authLost: null });
     await this.save();
     await this.sync(true);
     this.connect();
@@ -1652,6 +1681,8 @@ class DropitSettingTab extends PluginSettingTab {
       this.accountBusy = false;
       this.accountFailed = true;
       if (this.stateSetting !== row) return;
+      // Removed from the account: no retrying — the message says what happened, and joining again fixes it
+      if (AUTH_LOST.has(err.code)) { row.setDesc(err.message); return; }
       row.setDesc(t.accountRetry(err.message));
       const wait = [3_000, 10_000, 30_000][Math.min(this.accountTries++, 2)];
       this.accountTimer = window.setTimeout(() => this.loadAccount(), wait);
@@ -1740,7 +1771,9 @@ class DropitSettingTab extends PluginSettingTab {
       }));
 
     let mode = 'all';
-    let n = '';
+    // Each mode keeps its own number: 20 items and 7 days are different questions, and switching back
+    // and forth keeps what was typed for each
+    const counts = { last: '20', days: '7' };
     let number;
     new Setting(containerEl)
       .setName(t.repull)
@@ -1748,7 +1781,7 @@ class DropitSettingTab extends PluginSettingTab {
       .addDropdown((d) => d.addOptions({ all: t.repullAll, last: t.repullLast, days: t.repullDays }).onChange((v) => {
         mode = v;
         number.inputEl.toggle(v !== 'all');
-        if (!n) { n = v === 'days' ? '7' : '20'; number.setValue(n); }
+        if (v in counts) number.setValue(counts[v]);
       }))
       .addText((x) => {
         number = x;
@@ -1756,9 +1789,9 @@ class DropitSettingTab extends PluginSettingTab {
         x.inputEl.min = '1';
         x.inputEl.addClass('dropit-number');
         x.inputEl.toggle(false);
-        x.onChange((v) => { n = v; });
+        x.onChange((v) => { if (mode in counts) counts[mode] = v; });
       })
-      .addButton((b) => b.setButtonText(t.repullGo).onClick(() => this.run(() => p.repull(mode, Number(n)))));
+      .addButton((b) => b.setButtonText(t.repullGo).onClick(() => this.run(() => p.repull(mode, Number(counts[mode])))));
 
     new Setting(containerEl).setName(t.devicesHeading).setHeading();
     const add = new Setting(containerEl)

@@ -337,6 +337,29 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('commands run a second apart', timers.includes(1000));
   }
 
+  console.log('── The command did not run: say why ──');
+  {
+    const { p } = await makePlugin({ hookCommand: 'editor:toggle-bold' });
+    const warned = [];
+    const warn = console.warn;
+    console.warn = (m) => warned.push(m);
+    try {
+      // false from executeCommandById: either there's no such command, or it declined (e.g. it needs an open editor)
+      p.app.commands = { executeCommandById: () => false, findCommand: (id) => (id === 'editor:toggle-bold' ? { id, name: 'Toggle bold' } : undefined) };
+      p.hook({ seq: 1 });
+      await p.hookQueue;
+      ok('a command that exists but declined: "didn\'t run", not "not found"',
+        warned.length === 1 && warned[0].includes(DropitPlugin.STRINGS.en.hookNotRun('editor:toggle-bold')) && !/not found/i.test(warned[0]), JSON.stringify(warned));
+      p.settings.hookCommand = 'gone:plugin-removed';
+      p.hook({ seq: 2 });
+      await p.hookQueue;
+      ok('a command that is gone: "not found"', warned.length === 2 && warned[1].includes(DropitPlugin.STRINGS.en.hookMissing('gone:plugin-removed')), JSON.stringify(warned));
+      ok('both in Chinese too', /前提条件不满足/.test(DropitPlugin.STRINGS.zh.hookNotRun('x')) && /找不到命令/.test(DropitPlugin.STRINGS.zh.hookMissing('x')));
+    } finally {
+      console.warn = warn;
+    }
+  }
+
   console.log('── Where it came from (the browser extension adds the page) ──');
   {
     const { renderText, noteTitle, payloadOf } = DropitPlugin;
@@ -499,6 +522,66 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('…which heals it once the network is back', q.state !== 'error' && q.syncFails === 0, `${q.state} · ${q.syncFails}`);
   }
 
+  console.log('── Removed from the account: no endless retries ──');
+  for (const code of ['INVALID_TOKEN', 'DEVICE_REVOKED']) {
+    const { p } = await makePlugin();
+    let pulls = 0, tickets = 0, fixed = false;
+    serve({
+      'GET /v1/pull': () => { pulls++; return fixed ? { json: { items: [], has_more: false, next_after: 0 } } : { status: 401, json: { error: code } }; },
+      'POST /v1/ws/ticket': () => { tickets++; return fixed ? { json: { ticket: 't', realtime_until: null } } : { status: 401, json: { error: code } }; },
+    });
+    globalThis.WebSocket = class { constructor() { this.readyState = 0; } close() {} send() {} };
+    const setTimeout = window.setTimeout;
+    window.setTimeout = (fn, ms) => { timers.push(ms); return 0; };   // hold every timer: a retry must not even be scheduled
+    try {
+      timers.length = 0;
+      await p.sync(false);
+      ok(`${code}: the sync stops on ⚠ with the reason`, p.state === 'error' && p.error === DropitPlugin.STRINGS.en.errors[code], `${p.state} · ${p.error}`);
+      ok(`${code}: …and schedules no retry (5 s, 15 s, 60 s)`, timers.length === 0, JSON.stringify(timers));
+      p.heartbeat(); p.heartbeat();
+      await p.connect();
+      await p.sync(false);
+      await settle();
+      p.scheduleReconnect();
+      ok(`${code}: heartbeats, pushes and focus ask nothing more`, tickets === 0 && pulls === 1 && timers.length === 0,
+        `${tickets} tickets · ${pulls} pulls · ${JSON.stringify(timers)}`);
+      fixed = true;
+      await p.sync(true);
+      await settle();
+      ok(`${code}: a sync by hand asks again, and real-time comes back with it`, pulls === 2 && p.state !== 'error' && !p.authLost && tickets === 1,
+        `${pulls} pulls · ${tickets} tickets · ${p.state}`);
+
+      // Real-time on its own: the ticket request is refused the same way
+      const r = (await makePlugin()).p;
+      let rTickets = 0;
+      serve({ 'POST /v1/ws/ticket': () => { rTickets++; return { status: 401, json: { error: code } }; } });
+      timers.length = 0;
+      await r.connect();
+      ok(`${code}: a refused ticket shows ⚠ with the reason and schedules no reconnect`,
+        rTickets === 1 && timers.length === 0 && r.state === 'error' && r.error === DropitPlugin.STRINGS.en.errors[code],
+        `${rTickets} · ${JSON.stringify(timers)} · ${r.state} · ${r.error}`);
+      r.heartbeat(); r.scheduleReconnect();
+      await settle();
+      ok(`${code}: …and heartbeats don't ask again`, rTickets === 1 && timers.length === 0, `${rTickets} · ${JSON.stringify(timers)}`);
+      r.unloaded = true;
+
+      // Pairing again clears it too
+      const q = (await makePlugin()).p;
+      serve({ 'GET /v1/pull': () => ({ status: 401, json: { error: code } }) });
+      await q.sync(false);
+      let qPulls = 0;
+      serve({ 'GET /v1/pull': () => { qPulls++; return { json: { items: [], has_more: false, next_after: 0 } }; }, 'POST /v1/ws/ticket': () => ({ json: { ticket: 't', realtime_until: null } }) });
+      await q.adopt({ token: 'dk_new', device_id: 'd_new' });
+      await settle();
+      ok(`${code}: pairing again starts over`, qPulls === 1 && !q.authLost && q.state !== 'error', `${qPulls} · ${q.state}`);
+      // Stop both at the door: their sockets outlive this block, and a reconnect would reach the next stub server
+      p.unloaded = q.unloaded = true;
+    } finally {
+      window.setTimeout = setTimeout;
+      delete globalThis.WebSocket;
+    }
+  }
+
   console.log('── A stale server address heals itself ──');
   {
     const { p } = await makePlugin({}, { token: 'dk_x', endpoint: 'https://old.example.com' });
@@ -608,6 +691,23 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('commands registered: sync, send note, send selection', ['sync', 'send-note', 'send-selection'].every((id) => p.commands.some((c) => c.id === id)));
   }
 
+  console.log('── Send: at most 10 files at a time ──');
+  {
+    const { p, files } = await makePlugin();
+    let seq = 100;
+    const calls = serve({ 'POST /v1/ingest': () => ({ json: { seq: ++seq } }) });
+    const notes = Array.from({ length: 11 }, (_, i) => {
+      files.set(`Notes/n${i}.md`, `note ${i}`);
+      return { path: `Notes/n${i}.md`, name: `n${i}.md`, extension: 'md' };
+    });
+    notices.length = 0;
+    await p.sendFiles(notes);
+    ok('11 files: refused before sending anything, saying 10 is the limit', calls.length === 0 && notices.at(-1) === 'dropit: at most 10 files at a time', `${calls.length} · ${notices.at(-1)}`);
+    await p.sendFiles(notes.slice(0, 10));
+    ok('10 files: all sent, as one batch', calls.length === 10 && notices.at(-1) === 'dropit: sent 10 items'
+      && new Set(calls.map((c) => JSON.parse(c.body).meta.group.id)).size === 1, `${calls.length} · ${notices.at(-1)}`);
+  }
+
   console.log('── Settings page ──');
   for (const mode of ['note', 'append', 'daily']) {
     const { p } = await makePlugin({ mode });
@@ -623,6 +723,59 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     for (let i = 0; i < 20; i++) await settle();
     // A Setting returned from a promise callback is adopted as a thenable, forever: the window hung at 100% CPU
     ok(`renders when paired (${mode}), without a promise adopting a Setting`, !err && thenCalls < 50, err?.stack ?? `${thenCalls} then() calls`);
+  }
+
+  console.log('── Settings page: pull again keeps a number per mode ──');
+  {
+    // Picking "the last N items" filled in 20, and switching to "the last N days" kept 20 instead of 7
+    const { p } = await makePlugin();
+    p.tab.containerEl = anything();
+    p.api = async (m, path) => (path === '/v1/devices' ? { devices: [] } : {});
+    const asked = [];
+    p.repull = async (mode, n) => { asked.push([mode, n]); };
+    const row = {};
+    const { addDropdown, addText, addButton } = Setting.prototype;
+    const isRepull = (s) => s.name === DropitPlugin.STRINGS.en.repull;
+    Setting.prototype.addDropdown = function (cb) {
+      if (!isRepull(this)) return addDropdown.call(this, cb);
+      const d = anything();
+      d.onChange = (fn) => { row.pick = fn; return d; };
+      cb(d);
+      return this;
+    };
+    Setting.prototype.addText = function (cb) {
+      if (!isRepull(this)) return addText.call(this, cb);
+      const x = anything();
+      x.setValue = (v) => { row.value = v; return x; };
+      x.onChange = (fn) => { row.type = (v) => { row.value = v; fn(v); }; return x; };
+      cb(x);
+      return this;
+    };
+    Setting.prototype.addButton = function (cb) {
+      if (!isRepull(this)) return addButton.call(this, cb);
+      const b = anything();
+      b.onClick = (fn) => { row.go = fn; return b; };
+      cb(b);
+      return this;
+    };
+    try {
+      p.tab.display();
+      row.pick('last');
+      const lastDefault = row.value;
+      row.pick('days');
+      ok('the last N items starts at 20, the last N days at 7', lastDefault === '20' && row.value === '7', `${lastDefault} · ${row.value}`);
+      row.type('3');
+      row.pick('last');
+      const backToLast = row.value;
+      row.type('50');
+      row.pick('days');
+      ok('switching back and forth keeps what was typed for each', backToLast === '20' && row.value === '3', `${backToLast} · ${row.value}`);
+      row.pick('last');
+      await row.go();
+      ok('pull again uses the number of the chosen mode', JSON.stringify(asked) === '[["last",50]]', JSON.stringify(asked));
+    } finally {
+      Object.assign(Setting.prototype, { addDropdown, addText, addButton });
+    }
   }
 
   console.log('── Settings page: the top line stays true ──');
@@ -647,6 +800,20 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('…and schedules it', timers.includes(3_000), JSON.stringify(timers));
     for (let i = 0; i < 5; i++) await settle();
     ok('…and the account line heals on its own', meCalls === 2 && /^Paid · 5 of 10 devices/.test(row.desc), `${meCalls} · ${row.desc}`);
+
+    // Removed from the account: the line says so and stops asking
+    const gone = (await makePlugin()).p;
+    gone.tab.containerEl = anything();
+    let asked = 0;
+    gone.api = async (m, path) => {
+      if (path === '/v1/me') { asked++; throw Object.assign(new Error('This device was removed — pair again'), { code: 'DEVICE_REVOKED' }); }
+      return path === '/v1/devices' ? { devices: [] } : {};
+    };
+    timers.length = 0;
+    gone.tab.display();
+    for (let i = 0; i < 5; i++) await settle();
+    ok('removed from the account: the account line says so and stops asking', asked === 1
+      && /removed/.test(gone.tab.stateSetting.desc) && !timers.some((ms) => [3_000, 10_000, 30_000].includes(ms)), `${asked} · ${gone.tab.stateSetting.desc} · ${JSON.stringify(timers)}`);
 
     // Coming back online re-reads it at once
     const q = (await makePlugin()).p;
