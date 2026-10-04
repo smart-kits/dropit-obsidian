@@ -588,6 +588,93 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok(`renders when paired (${mode}), without a promise adopting a Setting`, !err && thenCalls < 50, err?.stack ?? `${thenCalls} then() calls`);
   }
 
+  console.log('── Settings page: the top line stays true ──');
+  {
+    // Right after Obsidian starts the network may not be up: the account line used to keep that error
+    // forever, under a headline that had meanwhile turned to "● Receiving in real time"
+    const { p } = await makePlugin();
+    p.tab.containerEl = anything();
+    let meCalls = 0;
+    p.api = async (m, path) => {
+      if (path === '/v1/me') {
+        if (++meCalls === 1) throw new Error('Can’t reach the server (net::ERR_CONNECTION_CLOSED)');
+        return { plan: 'paid', devices_used: 5, devices_limit: 10, bytes_used: 0, bytes_limit: 524288000 };
+      }
+      return path === '/v1/devices' ? { devices: [] } : {};
+    };
+    timers.length = 0;
+    p.tab.display();
+    await Promise.resolve(); await Promise.resolve();
+    const row = p.tab.stateSetting;
+    ok('a failed account read says it will try again', /trying again/.test(row.desc) && /ERR_CONNECTION_CLOSED/.test(row.desc), row.desc);
+    ok('…and schedules it', timers.includes(3_000), JSON.stringify(timers));
+    for (let i = 0; i < 5; i++) await settle();
+    ok('…and the account line heals on its own', meCalls === 2 && /^Paid · 5 of 10 devices/.test(row.desc), `${meCalls} · ${row.desc}`);
+
+    // Coming back online re-reads it at once
+    const q = (await makePlugin()).p;
+    q.tab.containerEl = anything();
+    let fails = true;
+    q.api = async (m, path) => {
+      if (path === '/v1/me') { if (fails) throw new Error('offline'); return { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 }; }
+      return path === '/v1/devices' ? { devices: [] } : {};
+    };
+    window.setTimeout = (fn, ms) => { timers.push(ms); return 0; };    // hold the retry timer
+    q.tab.display();
+    await settle();
+    fails = false;
+    q.setStatus('live');
+    await settle();
+    window.setTimeout = (fn, ms) => { timers.push(ms); setImmediate(fn); return 0; };
+    ok('the connection coming back re-reads the account at once', /^Free · 1 of 3 devices/.test(q.tab.stateSetting.desc), q.tab.stateSetting.desc);
+  }
+
+  console.log('── Connecting, not "disconnected" ──');
+  {
+    const { p } = await makePlugin();
+    p.tab.containerEl = anything();
+    p.api = async (m, path) => (path === '/v1/devices' ? { devices: [] } : path === '/v1/ws/ticket' ? { ticket: 't', realtime_until: null } : {});
+    p.tab.display();
+    let sock = null;
+    globalThis.WebSocket = class { constructor() { sock = this; this.readyState = 0; } close() { this.closed = true; this.onclose?.(); } send() {} };
+    const going = p.connect();
+    ok('asking for a ticket shows "connecting"', p.state === 'connecting' && p.tab.stateSetting.name === DropitPlugin.STRINGS.en.stateConnecting, `${p.state} · ${p.tab.stateSetting.name}`);
+    await going;
+    ok('still "connecting" while the socket opens', p.liveState() === 'connecting' && p.tab.stateSetting.name === DropitPlugin.STRINGS.en.stateConnecting, p.tab.stateSetting.name);
+    sock.readyState = 1;
+    sock.onopen();
+    ok('open: "receiving in real time"', p.state === 'live' && p.tab.stateSetting.name === DropitPlugin.STRINGS.en.stateLive, p.tab.stateSetting.name);
+    sock.onclose();
+    ok('closed: "disconnected, reconnecting"', p.state === 'offline' && p.tab.stateSetting.name === DropitPlugin.STRINGS.en.stateOffline, p.tab.stateSetting.name);
+
+    // A ticket request that never answers doesn't block the next attempt for good
+    const s = (await makePlugin()).p;
+    let asked = 0;
+    s.api = async (m, path) => { if (path === '/v1/ws/ticket') asked++; return new Promise(() => {}); };
+    s.connect();
+    s.connect();
+    ok('one attempt at a time', asked === 1, String(asked));
+    s.connectingAt = Date.now() - 31_000;
+    s.connect();
+    ok('…but one stuck for 30 s gives way', asked === 2, String(asked));
+
+    // Start: catch up and connect together, instead of real-time waiting for the whole catch-up
+    const r = (await makePlugin()).p;
+    const order = [];
+    let release;
+    r.api = async (m, path) => {
+      order.push(path.split('?')[0]);
+      if (path.startsWith('/v1/pull')) { await new Promise((res) => { release = res; }); return { items: [], has_more: false, next_after: 0 }; }
+      return path === '/v1/ws/ticket' ? { ticket: 't', realtime_until: null } : {};
+    };
+    globalThis.WebSocket = class { constructor() { this.readyState = 0; } close() {} send() {} };
+    const started = r.start();
+    await settle();
+    ok('start asks for the ticket without waiting for the catch-up', order.includes('/v1/ws/ticket') && order.includes('/v1/pull'), JSON.stringify(order));
+    release();
+    await started;
+  }
+
   console.log('── Feedback ──');
   {
     const url = new URL(DropitPlugin.issueUrl('3.0.3'));

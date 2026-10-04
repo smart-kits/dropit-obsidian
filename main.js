@@ -89,6 +89,7 @@ const STRINGS = {
       live: '● dropit',
       manual: '○ dropit',
       offline: '○ dropit · offline',
+      connecting: '◌ dropit',
       syncing: '↻ dropit',
       error: '⚠ dropit',
     },
@@ -97,6 +98,7 @@ const STRINGS = {
       live: 'Receiving in real time · click to sync now',
       manual: 'Syncs when Obsidian opens or you come back to it · click to sync now',
       offline: 'Disconnected, reconnecting · click to sync now',
+      connecting: 'Connecting… · click to sync now',
       syncing: 'Syncing…',
       error: (msg) => `${msg} · click to try again`,
     },
@@ -129,10 +131,12 @@ const STRINGS = {
     stateTrialOver: '○ Real-time trial ended · syncs when you open or come back',
     stateTrialFull: '○ Real-time spots are full today · back tomorrow',
     stateOffline: '○ Disconnected — reconnecting',
+    stateConnecting: '◌ Connecting…',
     stateError: (msg) => `⚠ ${msg}`,
     account: (m) => `${m.plan === 'paid' ? 'Paid' : 'Free'} · ${m.devices_used} of ${m.devices_limit} devices · `
       + `${mb(m.bytes_used)} of ${mb(m.bytes_limit, 0)} MB · items kept ${m.plan === 'paid' ? '10 days' : '1 day'} after sending`,
     accountLoading: 'Loading…',
+    accountRetry: (msg) => `Couldn't read your account (${msg}) — trying again shortly`,
     syncNow: 'Sync now',
     receiveHeading: 'Receiving',
     mode: 'Write items to',
@@ -226,6 +230,7 @@ const STRINGS = {
       live: '● dropit',
       manual: '○ dropit',
       offline: '○ dropit · 已断开',
+      connecting: '◌ dropit',
       syncing: '↻ dropit',
       error: '⚠ dropit',
     },
@@ -234,6 +239,7 @@ const STRINGS = {
       live: '实时接收中 · 点击立即同步',
       manual: '打开或回到 Obsidian 时同步 · 点击立即同步',
       offline: '已断开，正在重连 · 点击立即同步',
+      connecting: '正在连接… · 点击立即同步',
       syncing: '正在同步…',
       error: (msg) => `${msg} · 点击重试`,
     },
@@ -260,10 +266,12 @@ const STRINGS = {
     stateTrialOver: '○ 实时推送体验已结束 · 打开或回到时同步',
     stateTrialFull: '○ 今天的实时名额满了 · 明天自动恢复',
     stateOffline: '○ 已断开，正在重连',
+    stateConnecting: '◌ 正在连接…',
     stateError: (msg) => `⚠ ${msg}`,
     account: (m) => `${m.plan === 'paid' ? '付费版' : '免费版'} · 设备 ${m.devices_used}/${m.devices_limit} 台 · `
       + `空间 ${mb(m.bytes_used)}/${mb(m.bytes_limit, 0)} MB · 投递后保留 ${m.plan === 'paid' ? 10 : 1} 天`,
     accountLoading: '正在读取…',
+    accountRetry: (msg) => `读不到账号信息（${msg}），稍后自动重试`,
     syncNow: '立即同步',
     receiveHeading: '接收',
     mode: '收到的内容写到',
@@ -425,8 +433,10 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   async start() {
     if (!this.settings.token || this.unloaded) return;
-    await this.sync(false);      // catch up first, then go real-time
+    // Catch up and connect at the same time: done one after the other, real-time showed up only after
+    // the whole catch-up and a ticket round trip. A push that lands mid-sync just queues one more sync.
     this.connect();
+    await this.sync(false);
     if (Date.now() - (this.settings.endpointsCheckedAt ?? 0) > ENDPOINTS_CHECK_MS) this.refreshEndpoints();
   }
 
@@ -758,12 +768,18 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   // ── Real-time ─────────────────────────────────────────────────────────
 
   async connect() {
-    if (this.socket || !this.settings.token || this.unloaded || this.noRealtime) return;
+    // One attempt at a time; one stuck for 30 s (a ticket request that never answers) doesn't block the next
+    if (this.socket || (this.connecting && Date.now() - this.connectingAt < 30_000)) return;
+    if (!this.settings.token || this.unloaded || this.noRealtime) return;
+    // "Connecting", not "disconnected": from the ticket request until the socket opens or fails
+    this.connecting = true;
+    this.connectingAt = Date.now();
+    if (this.state === 'offline') this.setStatus('connecting');
     try {
       const { ticket, realtime_until: until } = await this.api('POST', '/v1/ws/ticket');
       this.realtimeUntil = until ?? null;             // null = paid, always on; otherwise the end of the trial
       this.ticketDay = Math.floor(Date.now() / DAY_MS);  // the trial's real-time is granted per UTC day
-      if (this.unloaded || this.socket) return;
+      if (this.unloaded || this.socket) return void this.connected(false);
       const url = new URL(this.base() + '/v1/ws');
       url.protocol = url.protocol.replace('http', 'ws');
       url.searchParams.set('ticket', ticket);
@@ -771,6 +787,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       const socket = new WebSocket(url);
       this.socket = socket;
       socket.onopen = () => {
+        this.connecting = false;
         this.retry = 0;
         this.realtimeWhy = null;
         this.lastBeat = Date.now();
@@ -788,11 +805,13 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       };
       socket.onclose = () => {
         if (this.socket === socket) this.socket = null;
-        if (!this.unloaded && this.state === 'live') this.setStatus('offline');
+        this.connecting = false;
+        if (!this.unloaded && (this.state === 'live' || this.state === 'connecting')) this.setStatus('offline');
         this.scheduleReconnect();
       };
       socket.onerror = () => socket.close();
     } catch (err) {
+      this.connecting = false;
       // 403 WS_REQUIRES_PAID: real-time isn't available — the trial is over, or today's spots are full.
       if (err.code === 'WS_REQUIRES_PAID') return void await this.stopRealtime(err.data?.reason ?? null);
       console.error('[dropit] ws', err);
@@ -888,8 +907,15 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     return this.socket?.readyState === 1 && Date.now() - (this.lastBeat ?? 0) < STALE_MS;
   }
 
+  /** The ticket arrived but there's nothing to open (unloaded, or another socket won the race) */
+  connected(open) {
+    this.connecting = false;
+    if (!open && this.state === 'connecting') this.setStatus(this.liveState());
+  }
+
   liveState() {
     if (this.socketFresh()) return 'live';
+    if (this.connecting) return 'connecting';
     return this.noRealtime ? 'manual' : 'offline';
   }
 
@@ -1580,7 +1606,37 @@ class DropitSettingTab extends PluginSettingTab {
 
   hide() {
     window.clearInterval(this.pairTimer);
+    window.clearTimeout(this.accountTimer);
     this.stateSetting = null;
+  }
+
+  /**
+   * The account line under the connection state. A failed read (the network not up yet right after
+   * Obsidian starts) used to stay on screen under "● Receiving in real time" until the tab was reopened:
+   * now it tries again — sooner when the connection comes back, else after 3 s, 10 s, 30 s.
+   */
+  loadAccount() {
+    const row = this.stateSetting;
+    if (!row || this.accountBusy) return;
+    window.clearTimeout(this.accountTimer);
+    this.accountBusy = true;
+    const p = this.plugin;
+    // Block bodies, never `=> setting.setX()`: Obsidian's Setting has a then(), so returning one from a
+    // promise callback makes the promise adopt it — then() hands itself back, forever, and the window hangs.
+    p.api('GET', '/v1/me').then((m) => {
+      this.accountBusy = false;
+      this.accountFailed = false;
+      if (this.stateSetting !== row) return;
+      row.setDesc(t.account(m));
+      if ('realtime_until' in m) { p.realtimeUntil = m.realtime_until; this.onStatus(); }   // the countdown, fresh
+    }, (err) => {
+      this.accountBusy = false;
+      this.accountFailed = true;
+      if (this.stateSetting !== row) return;
+      row.setDesc(t.accountRetry(err.message));
+      const wait = [3_000, 10_000, 30_000][Math.min(this.accountTries++, 2)];
+      this.accountTimer = window.setTimeout(() => this.loadAccount(), wait);
+    });
   }
 
   /** Called when the connection state changes, so the top line stays true while the tab is open. */
@@ -1588,9 +1644,13 @@ class DropitSettingTab extends PluginSettingTab {
     if (!this.stateSetting) return;
     const p = this.plugin;
     const live = p.state === 'live' || (p.state === 'syncing' && p.socketFresh());
+    const connecting = !live && (p.state === 'connecting' || (p.state === 'syncing' && p.connecting));
     const left = live && p.trialLeft();
+    // Back online after the account line failed: read it now instead of waiting for the timer
+    if (live && this.accountFailed) this.loadAccount();
     this.stateSetting.setName(p.state === 'error' ? t.stateError(p.error ?? '')
       : live ? (left ? t.stateLiveTrial(left) : t.stateLive)
+        : connecting ? t.stateConnecting
         : !p.noRealtime ? t.stateOffline
           : p.realtimeWhy === 'trial_over' ? t.stateTrialOver
             : p.realtimeWhy === 'trial_full' ? t.stateTrialFull : t.stateManual);
@@ -1625,13 +1685,8 @@ class DropitSettingTab extends PluginSettingTab {
       .setDesc(t.accountLoading)
       .addButton((b) => b.setButtonText(t.syncNow).onClick(() => this.run(() => p.sync(true))));
     this.onStatus();
-    const account = this.stateSetting;
-    // Block bodies, never `=> setting.setX()`: Obsidian's Setting has a then(), so returning one from a
-    // promise callback makes the promise adopt it — then() hands itself back, forever, and the window hangs.
-    p.api('GET', '/v1/me').then((m) => {
-      account.setDesc(t.account(m));
-      if ('realtime_until' in m) { p.realtimeUntil = m.realtime_until; this.onStatus(); }   // the countdown, fresh
-    }, (err) => { account.setDesc(err.message); });
+    this.accountTries = 0;
+    this.loadAccount();
 
     new Setting(containerEl).setName(t.receiveHeading).setHeading();
     const modeRow = new Setting(containerEl)
