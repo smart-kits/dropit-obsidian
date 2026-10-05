@@ -7,6 +7,10 @@
 
 桌面端和移动端都能用。它是 [dropit](https://github.com/smart-kits/dropit-client) 的一部分：一条只连着你自己设备的私人管道。
 
+![手机分享的照片、浏览器发来的页面和段落、一句话加三张截图、写进今天的日记、Obsidian 关着时发的东西重开后补齐、从 vault 发出文件。](./media/obsidian-tour.webp)
+
+<sub>画面内容：Lonely Planet 页面 · NASA 照片（公共领域）。</sub>
+
 ## 用起来是什么感觉
 
 | 你在别处… | 几秒后，vault 里 |

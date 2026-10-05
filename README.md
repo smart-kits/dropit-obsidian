@@ -7,6 +7,10 @@ titled, images embedded, sources linked. And anything in your vault goes out wit
 
 Desktop and mobile. Part of [dropit](https://github.com/smart-kits/dropit-client), a private pipe between your own devices.
 
+![A photo shared on the phone, a page and a paragraph from the browser, a line with three screenshots, today's daily note, catching up after Obsidian was closed, and files sent from the vault.](./media/obsidian-tour.webp)
+
+<sub>Shown: Lonely Planet pages · a NASA photograph (public domain).</sub>
+
 ## What it's like
 
 | Somewhere else, you… | In your vault, a few seconds later |
