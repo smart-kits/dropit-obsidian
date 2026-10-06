@@ -224,6 +224,8 @@ The interface follows Obsidian's language: English, or Simplified Chinese when O
   using another slot. To recognize it, the plugin sends the key it had, if any, and a fingerprint: a SHA-256 hash of
   this computer's name, user, OS, CPU, memory and the vault's folder (on a phone: screen, cores, time zone, vault name).
   Only the hash leaves the device, and it is not a credential.
+- The plugin talks to one service, the dropit server, to send and receive your items. What it keeps, for how long and
+  who can see it: [Privacy](https://dropit.smart-kits.xyz/privacy).
 
 ## Development
 

@@ -214,6 +214,7 @@ Ask me which vault and before creating an account, and never show or commit my t
 - 重新配对（重装之后、或换了一份 vault 副本）会替换之前那次配对，不再多占名额。为了认出来，插件会带上它原来的钥匙（如果还有），
   以及一个设备指纹：这台电脑的名字、用户、系统、CPU、内存和 vault 所在文件夹的 SHA-256 摘要（手机上是屏幕、核数、时区和 vault 名）。
   离开设备的只有摘要，它也不是登录凭证。
+- 插件只连一个服务：dropit 服务器，用来发送和接收你的内容。它存了什么、存多久、谁能看到：[隐私说明](https://dropit.smart-kits.xyz/privacy)。
 
 ## 开发
 
