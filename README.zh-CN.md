@@ -191,7 +191,7 @@ Ask me which vault and before creating an account, and never show or commit my t
 | 设备 | 账号里的每一台设备；「移除」会让它立刻停止收发 |
 | 反馈 | 「反馈问题」（新建一个公开的 issue，版本号已填好）·「源代码」 |
 | 高级 → 服务地址 | 只有拿到了别的地址才需要改；内置地址永远排在最后兜底 |
-| 高级 → 解除配对 | 清掉这个 vault 的登录；你的设置保留 |
+| 高级 → 解除配对 | 把这个 vault 从账号里移除（腾出一台设备的名额），并清掉它的登录；你的设置保留 |
 
 界面跟随 Obsidian 的语言：默认英文，Obsidian 设为中文时显示简体中文。
 
@@ -211,6 +211,9 @@ Ask me which vault and before creating an account, and never show or commit my t
 - 登录信息存在 vault 里这个插件的 `data.json` 中。**如果你同步或公开 vault，请排除
   `.obsidian/plugins/dropit/data.json`。** 「解除配对」会清掉它。
 - 每台设备有自己的钥匙，可以单独移除；移除后名额立刻释放。
+- 重新配对（重装之后、或换了一份 vault 副本）会替换之前那次配对，不再多占名额。为了认出来，插件会带上它原来的钥匙（如果还有），
+  以及一个设备指纹：这台电脑的名字、用户、系统、CPU、内存和 vault 所在文件夹的 SHA-256 摘要（手机上是屏幕、核数、时区和 vault 名）。
+  离开设备的只有摘要，它也不是登录凭证。
 
 ## 开发
 

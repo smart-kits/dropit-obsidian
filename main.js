@@ -29,6 +29,7 @@ const DEFAULTS = {
   endpoints: [DEFAULT_ENDPOINT], // tried in order; the first one that answers moves to the front
   token: '',
   device_id: '',
+  previous_token: '',            // the key this vault had before it was removed or unpaired offline: sent with the next pairing
   cursor: 0,                     // the local cursor is the source of truth
   maxSeq: 0,                     // highest item ever written; below it, check the vault before writing again
   mode: 'note',                  // 'note' · 'append' · 'daily'
@@ -198,7 +199,9 @@ const STRINGS = {
     serverAddress: 'Server address',
     serverAddressDesc: 'Rarely needs changing. If it stops answering, the built-in address is tried next.',
     unpair: 'Unpair',
-    unpairDesc: 'Clears this device\'s settings only — your items and devices stay',
+    unpairDesc: 'Removes this vault from your account, freeing its device slot, and clears its settings here — your items stay',
+    replacedOld: (name) => `dropit: took the place of this vault's earlier "${name}" — it no longer uses a device slot`,
+    revokedReplaced: 'dropit was paired again for this vault, so this copy was signed out — pair again to use it',
     unpairButton: 'Unpair',
     ago: { now: 'just now', min: (n) => `${n} min ago`, hour: (n) => `${n} h ago`, day: (n) => `${n} d ago` },
   },
@@ -334,7 +337,9 @@ const STRINGS = {
     serverAddress: '服务地址',
     serverAddressDesc: '一般不用改。这个地址连不上时，会自动改用内置地址。',
     unpair: '解除配对',
-    unpairDesc: '只清空本机设置，不会删掉服务端的设备或内容',
+    unpairDesc: '把这个仓库从账号里移除、腾出一台设备的名额，并清空本机设置 —— 内容不受影响',
+    replacedOld: (name) => `dropit：替换了这个仓库之前的「${name}」，不再多占一台设备的名额`,
+    revokedReplaced: '这个仓库重新配对过 dropit，这一份已退出 —— 要用请重新配对',
     unpairButton: '解除',
     ago: { now: '刚刚', min: (n) => `${n} 分钟前`, hour: (n) => `${n} 小时前`, day: (n) => `${n} 天前` },
   },
@@ -1100,18 +1105,30 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   // ── First run: create an account or join with a pairing code ──────────
 
   async createAccount() {
-    const res = await this.api('POST', '/v1/accounts', { device_name: 'Obsidian' }, false);
+    const res = await this.api('POST', '/v1/accounts', { device_name: 'Obsidian', ...await this.sameVault() }, false);
     await this.adopt(res);
   }
 
   async claimCode(code) {
     const res = await this.api('POST', '/v1/pair/claim',
-      { code: code.trim().toUpperCase().replace(/[^0-9A-Z]/g, ''), device_name: 'Obsidian', scope: 'full' }, false);
+      { code: code.trim().toUpperCase().replace(/[^0-9A-Z]/g, ''), device_name: 'Obsidian', scope: 'full', ...await this.sameVault() }, false);
     await this.adopt(res);
   }
 
-  async adopt({ token, device_id }) {
-    Object.assign(this.settings, { token, device_id, cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {},
+  /**
+   * What lets the service tell this vault pairing again from a new device, so it takes the earlier pairing's
+   * place instead of using another device slot: the key it had (still working or already removed), and a
+   * fingerprint of this computer and vault (deviceKeyOf).
+   */
+  async sameVault() {
+    const previous = this.settings.token || this.settings.previous_token;
+    const key = Platform?.isDesktopApp ? await deviceKeyOf('obsidian', desktopFacts(this.app)) : await deviceKeyOf('obsidian-mobile', mobileFacts(this.app));
+    return { ...(key ? { device_key: key } : {}), ...(previous ? { previous_token: previous } : {}) };
+  }
+
+  async adopt({ token, device_id, replaced }) {
+    if (replaced && replaced.how !== 'issuer') new Notice(t.replacedOld(replaced.name));
+    Object.assign(this.settings, { token, device_id, previous_token: '', cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {},
       noRealtimeNoticed: false, trialEndingNoticed: false, fullNoticedDay: null });
     Object.assign(this, { noRealtime: false, realtimeWhy: null, realtimeUntil: null, authLost: null });
     await this.save();
@@ -1120,8 +1137,18 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     this.refreshEndpoints();
   }
 
+  /**
+   * Remove this vault from the account first, so it stops using a device slot. Offline or already removed:
+   * clear it here anyway, keeping the key so the next pairing takes this one's place.
+   */
   async unpair() {
-    Object.assign(this.settings, { token: '', device_id: '', cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {} });
+    let previous = '';
+    try {
+      if (this.settings.token) await this.api('DELETE', `/v1/devices/${encodeURIComponent(this.settings.device_id)}`);
+    } catch {
+      previous = this.settings.token;
+    }
+    Object.assign(this.settings, { token: '', device_id: '', previous_token: previous, cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {} });
     await this.save();
     this.socket?.close();
     this.socket = null;
@@ -1174,7 +1201,9 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       }
       const data = safeJson(res) ?? {};
       if (res.status < 400) return data;
-      throw new ApiError(t.errors[data.error] ?? t.httpFailed(res.status), { code: data.error, status: res.status, data });
+      const message = data.error === 'DEVICE_REVOKED' && data.reason === 'replaced' ? t.revokedReplaced
+        : t.errors[data.error] ?? t.httpFailed(res.status);
+      throw new ApiError(message, { code: data.error, status: res.status, data });
     }
     throw new ApiError(t.offline(lastErr?.message ?? ''));
   }
@@ -1231,6 +1260,37 @@ const withMd = (p) => (/\.md$/i.test(p) ? p : `${p}.md`);
 const parentOf = (p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '/');
 const basename = (p) => p.slice(p.lastIndexOf('/') + 1).replace(/\.md$/i, '');
 const safeJson = (res) => { try { return res.json; } catch { return null; } };
+
+/**
+ * A fingerprint of this computer (or phone) and vault: SHA-256 of a few facts that stay put, worked out here —
+ * only the hash is sent. It is not a credential: the key (`dk_…`) stays random. Undefined when it can't be
+ * worked out; pairing then works exactly as before.
+ */
+async function deviceKeyOf(kind, facts) {
+  try {
+    const hash = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([kind, ...facts])));
+    return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return undefined;
+  }
+}
+
+/** Desktop: host name, user, OS, CPU, memory and the vault's folder (two vaults on one computer are two devices) */
+function desktopFacts(app, os = require('os')) {
+  let user = '';
+  try { user = os.userInfo().username; } catch { /* left out */ }
+  return [os.hostname(), user, os.platform(), os.arch(), os.cpus()[0]?.model ?? '', os.totalmem(),
+    app.vault.adapter?.basePath ?? app.vault.getName?.() ?? ''];
+}
+
+/** Phone or tablet: no OS access, so the screen (a phone has no external display), cores, time zone and the vault's name */
+function mobileFacts(app, nav = globalThis.navigator, scr = globalThis.screen) {
+  let zone = '';
+  try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* left out */ }
+  const size = scr ? [Math.min(scr.width, scr.height), Math.max(scr.width, scr.height), globalThis.devicePixelRatio ?? ''].join('x') : '';
+  return [Platform?.isIosApp ? 'iOS' : Platform?.isAndroidApp ? 'Android' : nav?.platform ?? '', size, nav?.hardwareConcurrency ?? '', zone,
+    app.vault.getName?.() ?? ''];
+}
 const yamlString = (s) => (/^[\w .@/-]*$/.test(String(s)) ? String(s) : JSON.stringify(String(s)));
 
 function groupOf(item) {
@@ -1939,4 +1999,4 @@ class Confirm extends Modal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { STRINGS, QR, noteTitle, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });
+Object.assign(module.exports, { deviceKeyOf, desktopFacts, mobileFacts, STRINGS, QR, noteTitle, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });

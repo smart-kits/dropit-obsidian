@@ -1037,6 +1037,49 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('English for other languages', /couldn't be downloaded/.test(await warningIn('de')));
   }
 
+  console.log('── Pairing again takes the earlier pairing\'s place ──');
+  {
+    const { deviceKeyOf, desktopFacts } = DropitPlugin;
+    const fakeOs = { hostname: () => 'mac', userInfo: () => ({ username: 'me' }), platform: () => 'darwin', arch: () => 'arm64', cpus: () => [{ model: 'Apple M1' }], totalmem: () => 16 };
+    const vault = (path) => ({ vault: { adapter: { basePath: path }, getName: () => 'v' } });
+    const a = await deviceKeyOf('obsidian', desktopFacts(vault('/Users/me/Notes'), fakeOs));
+    ok('fingerprint is a 64-character hex hash, never the facts', /^[0-9a-f]{64}$/.test(a) && !a.includes('mac'), a);
+    ok('the same computer and vault give the same fingerprint', await deviceKeyOf('obsidian', desktopFacts(vault('/Users/me/Notes'), fakeOs)) === a);
+    ok('another vault on the same computer is another device', await deviceKeyOf('obsidian', desktopFacts(vault('/Users/me/Work'), fakeOs)) !== a);
+
+    // A removed vault pairs again: it sends the key it had, and says it took that one's place
+    const { p } = await makePlugin({ token: 'dk_old', device_id: 'd_old' });
+    let claimed;
+    serve({
+      'POST /v1/pair/claim': (body) => { claimed = body; return { json: { token: 'dk_new', device_id: 'd_new', replaced: { device_id: 'd_old', name: 'Obsidian', how: 'token' } } }; },
+      'GET /v1/pull': pages([]),
+    });
+    notices.length = 0;
+    await p.claimCode('abc123');
+    ok('pairing again sends the key this vault had', claimed?.previous_token === 'dk_old', JSON.stringify(claimed));
+    ok('…and a fingerprint (a hash)', /^[0-9a-f]{64}$/.test(claimed?.device_key ?? ''), JSON.stringify(claimed));
+    ok('…and says it took the earlier one\'s place', notices.some((n) => /took the place/.test(n)), JSON.stringify(notices));
+    ok('…the new key is kept, the old one forgotten', p.settings.token === 'dk_new' && !p.settings.previous_token);
+
+    // Unpair removes this vault from the account first
+    const calls = serve({ 'DELETE /v1/devices/': () => ({ json: { ok: true } }) });
+    await p.unpair();
+    ok('unpair removes this device from the account first', calls.some((c) => c.method === 'DELETE' && c.path === '/v1/devices/d_new'), JSON.stringify(calls));
+    ok('…then clears it here, keeping nothing', !p.settings.token && !p.settings.previous_token);
+
+    // Offline: cleared here anyway, the key kept for the next pairing
+    const { p: q } = await makePlugin({ token: 'dk_off', device_id: 'd_off' });
+    net = async () => { throw new Error('offline'); };
+    await q.unpair();
+    ok('unpair offline: cleared here, the key kept for the next pairing', !q.settings.token && q.settings.previous_token === 'dk_off');
+
+    // Removed because this vault paired again elsewhere: said as such
+    const { p: r } = await makePlugin({ token: 'dk_gone' });
+    serve({ 'GET /v1/me': () => ({ status: 403, json: { error: 'DEVICE_REVOKED', reason: 'replaced' } }) });
+    const err = await r.api('GET', '/v1/me').catch((e) => e);
+    ok('DEVICE_REVOKED + replaced reads as "paired again", not "removed"', /paired again/.test(err.message), err.message);
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '🛑'}  ${pass} passed, ${fail} failed\n`);
   process.exit(fail ? 1 : 0);
 })();

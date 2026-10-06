@@ -200,7 +200,7 @@ Ask me which vault and before creating an account, and never show or commit my t
 | Devices | Every device on your account; *Remove* stops one right away |
 | Feedback | *Report a problem* (a new public issue with your versions filled in) · *Source code* |
 | Advanced → Server address | Only if you were given another address; the built-in one is always tried last |
-| Advanced → Unpair | Forgets this vault's sign-in; your settings stay |
+| Advanced → Unpair | Removes this vault from your account (freeing its device slot) and forgets its sign-in; your settings stay |
 
 The interface follows Obsidian's language: English, or Simplified Chinese when Obsidian is set to Chinese.
 
@@ -220,6 +220,10 @@ The interface follows Obsidian's language: English, or Simplified Chinese when O
 - The sign-in is stored in this plugin's `data.json` inside your vault. **If you sync or publish your vault,
   exclude `.obsidian/plugins/dropit/data.json`.** *Unpair* clears it.
 - Each device has its own key and can be removed on its own; removing one frees its slot at once.
+- Pairing again (after reinstalling, or on a fresh copy of the vault) takes the earlier pairing's place instead of
+  using another slot. To recognize it, the plugin sends the key it had, if any, and a fingerprint: a SHA-256 hash of
+  this computer's name, user, OS, CPU, memory and the vault's folder (on a phone: screen, cores, time zone, vault name).
+  Only the hash leaves the device, and it is not a credential.
 
 ## Development
 
