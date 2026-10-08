@@ -1,0 +1,50 @@
+# Signed build provenance for the three release files, so anyone can check that what they downloaded is what
+# this repository published:
+#
+#   gh attestation verify main.js --repo smart-kits/dropit-obsidian
+#
+# There is no build step: main.js, manifest.json and styles.css are committed as they ship. A release is made by
+# uploading those committed files to the tag (`gh release create <tag> main.js manifest.json styles.css`), so the
+# files checked out at the tag here are byte for byte the release assets, and the digests attested below are the
+# digests of the assets. The check before attesting makes sure of that instead of assuming it.
+
+name: Attest release files
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read       # check out the tag, download the release assets
+      id-token: write      # sign the attestation
+      attestations: write  # store it with the repository
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Release assets match the files at the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets \
+            --pattern main.js --pattern manifest.json --pattern styles.css
+          for f in main.js manifest.json styles.css; do
+            cmp "$f" "assets/$f" || { echo "::error::$f in release $TAG differs from $f at the tag"; exit 1; }
+          done
+          sha256sum main.js manifest.json styles.css
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css

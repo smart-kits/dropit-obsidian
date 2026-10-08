@@ -123,7 +123,7 @@ function makeVault() {
 }
 
 /** A plugin that went through the real onload(), with its settings, a fresh vault, and a stub server. */
-async function makePlugin(settings = {}, stored) {
+async function makePlugin(settings = {}, stored, local = {}) {
   const v = makeVault();
   const events = [];
   const ran = [];
@@ -131,6 +131,7 @@ async function makePlugin(settings = {}, stored) {
     vault: v.vault, fileManager: v.fileManager, metadataCache: v.metadataCache,
     workspace: { onLayoutReady() {}, on: () => ({}), trigger: (name, payload) => events.push({ name, payload }), getActiveFile: () => null },
     commands: { executeCommandById: (id) => { ran.push({ id, received: p.received }); return true; } },
+    ...local,
   };
   const p = new DropitPlugin(app);
   p.stored = stored ?? { token: 'dk_x', ...settings };
@@ -1039,16 +1040,57 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
 
   console.log('── Pairing again takes the earlier pairing\'s place ──');
   {
-    const { deviceKeyOf, desktopFacts } = DropitPlugin;
-    const fakeOs = { hostname: () => 'mac', userInfo: () => ({ username: 'me' }), platform: () => 'darwin', arch: () => 'arm64', cpus: () => [{ model: 'Apple M1' }], totalmem: () => 16 };
-    const vault = (path) => ({ vault: { adapter: { basePath: path }, getName: () => 'v' } });
-    const a = await deviceKeyOf('obsidian', desktopFacts(vault('/Users/me/Notes'), fakeOs));
-    ok('fingerprint is a 64-character hex hash, never the facts', /^[0-9a-f]{64}$/.test(a) && !a.includes('mac'), a);
-    ok('the same computer and vault give the same fingerprint', await deviceKeyOf('obsidian', desktopFacts(vault('/Users/me/Notes'), fakeOs)) === a);
-    ok('another vault on the same computer is another device', await deviceKeyOf('obsidian', desktopFacts(vault('/Users/me/Work'), fakeOs)) !== a);
+    const { deviceKeyOf, localIdOf } = DropitPlugin;
+    // Obsidian keeps local storage per vault: `<vault id>-<key>`, JSON (what app.saveLocalStorage does)
+    const browser = new Map();
+    const vaultApp = (appId) => ({
+      appId,
+      loadLocalStorage: (k) => (browser.has(`${appId}-${k}`) ? JSON.parse(browser.get(`${appId}-${k}`)) : null),
+      saveLocalStorage: (k, v) => { if (v == null) browser.delete(`${appId}-${k}`); else browser.set(`${appId}-${k}`, JSON.stringify(v)); },
+    });
+    const a = await deviceKeyOf(vaultApp('vaultA'));
+    const id = localIdOf(vaultApp('vaultA'));
+    ok('device key is a 64-character hex hash of a random id, never the id itself', /^[0-9a-f]{64}$/.test(a) && /^[0-9a-f]{32}$/.test(id) && !a.includes(id), a);
+    ok('the random id is kept in this vault\'s local storage', JSON.parse(browser.get('vaultA-dropit-device-id')) === id, JSON.stringify([...browser]));
+    ok('the same vault gives the same key every time', await deviceKeyOf(vaultApp('vaultA')) === a);
+    ok('another vault is another device', await deviceKeyOf(vaultApp('vaultB')) !== a);
+    ok('…with an id of its own', localIdOf(vaultApp('vaultB')) !== id);
+
+    // Before the public API (Obsidian < 1.8.7): the same entry through window.localStorage
+    const ls = { getItem: (k) => browser.get(k) ?? null, setItem: (k, v) => browser.set(k, String(v)) };
+    window.localStorage = ls;
+    ok('older Obsidian: the same entry through window.localStorage', await deviceKeyOf({ appId: 'vaultA' }) === a);
+    const before = browser.has('vaultC-dropit-device-id');
+    const c = await deviceKeyOf({ appId: 'vaultC' });
+    ok('…a new vault gets its id there too', !before && c && c !== a && /^[0-9a-f]{32}$/.test(JSON.parse(browser.get('vaultC-dropit-device-id'))));
+    delete window.localStorage;
+    ok('nowhere to keep an id: no key, nothing made up', await deviceKeyOf({}) === undefined);
+    ok('storage that drops what it\'s given: no key', await deviceKeyOf({ appId: 'x', loadLocalStorage: () => null, saveLocalStorage: () => {} }) === undefined);
+
+    // Reinstalling the plugin deletes data.json; the id lives elsewhere, so the key stays
+    const reinstall = vaultApp('vaultR');
+    const first = await makePlugin({}, {}, reinstall);
+    let sent;
+    serve({ 'POST /v1/accounts': (body) => { sent = body; return { json: { token: 'dk_r1', device_id: 'd_r1' } }; }, 'GET /v1/pull': pages([]) });
+    await first.p.createAccount();
+    const kept = JSON.parse(browser.get('vaultR-dropit-device-id'));
+    ok('the id is not in the plugin\'s settings or data.json', !JSON.stringify(first.p.settings).includes(kept) && !JSON.stringify(first.p.stored).includes(kept),
+      JSON.stringify(first.p.stored));
+    const again = await makePlugin({}, {}, reinstall);          // data.json gone: no token, no previous_token
+    let claimedAgain;
+    serve({ 'POST /v1/pair/claim': (body) => { claimedAgain = body; return { json: { token: 'dk_r2', device_id: 'd_r2', replaced: { device_id: 'd_r1', name: 'Obsidian', how: 'key' } } }; },
+      'GET /v1/pull': pages([]) });
+    await again.p.claimCode('abc123');
+    ok('reinstalled: pairing again sends the same key, with no old token', claimedAgain?.device_key === sent?.device_key && /^[0-9a-f]{64}$/.test(sent?.device_key ?? '')
+      && !claimedAgain.previous_token, JSON.stringify([sent, claimedAgain]));
+
+    // The audit flagged reading the computer's identity: none of it is read any more
+    const src = require('node:fs').readFileSync(require.resolve('./main.js'), 'utf8');
+    ok('main.js reads nothing about the computer: no os module, host name or user', !/require\(\s*['"](node:)?os['"]\s*\)/.test(src)
+      && !/\bos\.(hostname|userInfo|cpus|totalmem|platform|arch|networkInterfaces)\b/.test(src) && !/userInfo|hardwareConcurrency|devicePixelRatio/.test(src));
 
     // A removed vault pairs again: it sends the key it had, and says it took that one's place
-    const { p } = await makePlugin({ token: 'dk_old', device_id: 'd_old' });
+    const { p } = await makePlugin({ token: 'dk_old', device_id: 'd_old' }, undefined, vaultApp('vaultP'));
     let claimed;
     serve({
       'POST /v1/pair/claim': (body) => { claimed = body; return { json: { token: 'dk_new', device_id: 'd_new', replaced: { device_id: 'd_old', name: 'Obsidian', how: 'token' } } }; },
@@ -1057,7 +1099,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     notices.length = 0;
     await p.claimCode('abc123');
     ok('pairing again sends the key this vault had', claimed?.previous_token === 'dk_old', JSON.stringify(claimed));
-    ok('…and a fingerprint (a hash)', /^[0-9a-f]{64}$/.test(claimed?.device_key ?? ''), JSON.stringify(claimed));
+    ok('…and its device key (a hash)', /^[0-9a-f]{64}$/.test(claimed?.device_key ?? ''), JSON.stringify(claimed));
     ok('…and says it took the earlier one\'s place', notices.some((n) => /took the place/.test(n)), JSON.stringify(notices));
     ok('…the new key is kept, the old one forgotten', p.settings.token === 'dk_new' && !p.settings.previous_token);
 

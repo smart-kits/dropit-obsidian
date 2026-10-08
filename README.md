@@ -172,7 +172,11 @@ module.exports = async ({ app }) => {
   click *Sync now*. The paid plan raises the limits and keeps real-time delivery on.
 - **Network use.** The plugin talks to one service, the dropit server, over HTTPS and a WebSocket, to send and
   receive your items. No telemetry, no ads. Details in [Privacy](#privacy).
-- **Files.** It reads and writes only inside this vault.
+- **Files.** It reads and writes only inside this vault. It doesn't scan your notes: only when an item comes back a
+  second time (*Pull again*, or a sync that was cut short), it looks up the `dropit_seq` (and other `dropit_…`) fields in each
+  note's front matter through Obsidian's metadata cache, so the item isn't written twice. It never reads note bodies for this.
+- **Clipboard.** *Add a device → Generate a pairing code* writes the code to the clipboard so you can paste it.
+  The plugin never reads the clipboard.
 
 ## Set up
 
@@ -232,10 +236,11 @@ The interface follows Obsidian's language: English, or Simplified Chinese when O
 - The sign-in is stored in this plugin's `data.json` inside your vault. **If you sync or publish your vault,
   exclude `.obsidian/plugins/dropit/data.json`.** *Unpair* clears it.
 - Each device has its own key and can be removed on its own; removing one frees its slot at once.
-- Pairing again (after reinstalling, or on a fresh copy of the vault) takes the earlier pairing's place instead of
-  using another slot. To recognize it, the plugin sends the key it had, if any, and a fingerprint: a SHA-256 hash of
-  this computer's name, user, OS, CPU, memory and the vault's folder (on a phone: screen, cores, time zone, vault name).
-  Only the hash leaves the device, and it is not a credential.
+- Pairing this vault again (for example after reinstalling the plugin) takes the earlier pairing's place instead of
+  using another slot. To recognize it, the plugin sends the key it had, if any, and a SHA-256 hash of a random ID.
+  The ID is made the first time this vault joins dropit and kept in Obsidian's local storage for this vault on this device — not in
+  `data.json`, and not synced with the vault — so it outlasts a reinstall. Nothing about your computer or phone goes
+  into it, only the hash leaves the device, and it is not a credential.
 - The plugin talks to one service, the dropit server, to send and receive your items. What it keeps, for how long and
   who can see it: [Privacy](https://dropit.smart-kits.xyz/privacy).
 

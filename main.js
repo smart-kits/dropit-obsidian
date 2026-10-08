@@ -1118,11 +1118,11 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   /**
    * What lets the service tell this vault pairing again from a new device, so it takes the earlier pairing's
    * place instead of using another device slot: the key it had (still working or already removed), and a
-   * fingerprint of this computer and vault (deviceKeyOf).
+   * hash of this vault's random id (deviceKeyOf).
    */
   async sameVault() {
     const previous = this.settings.token || this.settings.previous_token;
-    const key = Platform?.isDesktopApp ? await deviceKeyOf('obsidian', desktopFacts(this.app)) : await deviceKeyOf('obsidian-mobile', mobileFacts(this.app));
+    const key = await deviceKeyOf(this.app);
     return { ...(key ? { device_key: key } : {}), ...(previous ? { previous_token: previous } : {}) };
   }
 
@@ -1262,34 +1262,52 @@ const basename = (p) => p.slice(p.lastIndexOf('/') + 1).replace(/\.md$/i, '');
 const safeJson = (res) => { try { return res.json; } catch { return null; } };
 
 /**
- * A fingerprint of this computer (or phone) and vault: SHA-256 of a few facts that stay put, worked out here —
- * only the hash is sent. It is not a credential: the key (`dk_…`) stays random. Undefined when it can't be
- * worked out; pairing then works exactly as before.
+ * Where this vault keeps things on this device only: Obsidian's per-vault local storage. It is not data.json, so it
+ * stays when the plugin is reinstalled, and it is never synced with the vault. Obsidian versions before the public
+ * API get the same entry (`<vault id>-<key>`, JSON) through window.localStorage. Undefined when neither is there.
  */
-async function deviceKeyOf(kind, facts) {
+function vaultStorage(app, ls = window.localStorage) {
+  if (typeof app?.loadLocalStorage === 'function' && typeof app.saveLocalStorage === 'function') {
+    return { load: (k) => app.loadLocalStorage(k), save: (k, v) => app.saveLocalStorage(k, v) };
+  }
+  if (!app?.appId || !ls) return undefined;
+  return {
+    load: (k) => { try { return JSON.parse(ls.getItem(`${app.appId}-${k}`)); } catch { return null; } },
+    save: (k, v) => { try { ls.setItem(`${app.appId}-${k}`, JSON.stringify(v)); } catch { /* not kept */ } },
+  };
+}
+
+const LOCAL_ID = 'dropit-device-id';
+const randomId = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
+
+/**
+ * A random id for this vault on this device, made the first time it's needed and kept in the vault's local storage.
+ * Nothing about the computer or phone goes into it. Undefined when it can't be kept: an id that would be different
+ * next time is no use.
+ */
+function localIdOf(app, store = vaultStorage(app)) {
+  if (!store) return undefined;
+  const had = store.load(LOCAL_ID);
+  if (typeof had === 'string' && /^[0-9a-f]{32}$/.test(had)) return had;
+  const id = randomId();
+  store.save(LOCAL_ID, id);
+  return store.load(LOCAL_ID) === id ? id : undefined;
+}
+
+/**
+ * What lets the service recognize this vault pairing again after a reinstall: SHA-256 of the client type and the
+ * vault's random id (localIdOf), worked out here — only the hash is sent. It is not a credential: the key (`dk_…`)
+ * stays random. Undefined when there's no id; pairing then works exactly as before.
+ */
+async function deviceKeyOf(app, store) {
   try {
-    const hash = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([kind, ...facts])));
+    const id = localIdOf(app, store);
+    if (!id) return undefined;
+    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(['obsidian', id])));
     return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
   } catch {
     return undefined;
   }
-}
-
-/** Desktop: host name, user, OS, CPU, memory and the vault's folder (two vaults on one computer are two devices) */
-function desktopFacts(app, os = require('os')) {
-  let user = '';
-  try { user = os.userInfo().username; } catch { /* left out */ }
-  return [os.hostname(), user, os.platform(), os.arch(), os.cpus()[0]?.model ?? '', os.totalmem(),
-    app.vault.adapter?.basePath ?? app.vault.getName?.() ?? ''];
-}
-
-/** Phone or tablet: no OS access, so the screen (a phone has no external display), cores, time zone and the vault's name */
-function mobileFacts(app, nav = globalThis.navigator, scr = globalThis.screen) {
-  let zone = '';
-  try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* left out */ }
-  const size = scr ? [Math.min(scr.width, scr.height), Math.max(scr.width, scr.height), globalThis.devicePixelRatio ?? ''].join('x') : '';
-  return [Platform?.isIosApp ? 'iOS' : Platform?.isAndroidApp ? 'Android' : nav?.platform ?? '', size, nav?.hardwareConcurrency ?? '', zone,
-    app.vault.getName?.() ?? ''];
 }
 const yamlString = (s) => (/^[\w .@/-]*$/.test(String(s)) ? String(s) : JSON.stringify(String(s)));
 
@@ -1999,4 +2017,4 @@ class Confirm extends Modal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { deviceKeyOf, desktopFacts, mobileFacts, STRINGS, QR, noteTitle, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });
+Object.assign(module.exports, { deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });
