@@ -219,6 +219,8 @@ Ask me which vault and before creating an account, and never show or commit my t
 | 「实时推送体验已结束」 | 新账号有一段实时推送体验期；之后改为打开或回到 Obsidian 时同步 | 不用修 —— 随时点状态栏就能同步 |
 | 笔记里出现 `⚠️ ……没能下载下来` | 这次文件没下下来 | 「设置 → dropit → 重新拉取」 |
 
+其他问题：「设置 → dropit → 反馈 → 反馈问题」（公开的 issue）。账号相关、不方便公开的问题，发邮件到 [support@dropit.smart-kits.xyz](mailto:support@dropit.smart-kits.xyz)。
+
 ## 隐私
 
 - 登录信息存在 vault 里这个插件的 `data.json` 中。**如果你同步或公开 vault，请排除

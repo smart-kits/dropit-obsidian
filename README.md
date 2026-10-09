@@ -231,6 +231,8 @@ The interface follows Obsidian's language: English, or Simplified Chinese when O
 | *Real-time trial ended* | New accounts get real-time for a while; after that it syncs when you open or come back to Obsidian | Nothing to fix — click the status bar to sync any time |
 | `⚠️ … couldn't be downloaded` in a note | The file didn't come down this time | *Settings → dropit → Pull again* |
 
+Anything else: *Settings → dropit → Feedback → Report a problem* (a public issue). For questions about your account you'd rather not post publicly, email [support@dropit.smart-kits.xyz](mailto:support@dropit.smart-kits.xyz).
+
 ## Privacy
 
 - The sign-in is stored in this plugin's `data.json` inside your vault. **If you sync or publish your vault,
