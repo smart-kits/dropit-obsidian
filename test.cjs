@@ -1125,6 +1125,18 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('DEVICE_REVOKED + replaced reads as "paired again", not "removed"', /paired again/.test(err.message), err.message);
   }
 
+  console.log('── The directory takes the manifest as is ──');
+  {
+    const m = JSON.parse(require('node:fs').readFileSync(require.resolve('./manifest.json'), 'utf8'));
+    // 3.1.2's "dropit — Sync Anything Across Phone, PC & Web" hid the entry: "Name not allowed in the directory".
+    // Every one of the directory's 8,599 names uses only these characters (10-09), and none says Obsidian
+    ok('name: only letters, digits, spaces and - . + ( ) — the directory hid 3.1.2 for an em dash, & and a comma',
+      /^[A-Za-z0-9 .+()-]+$/.test(m.name) && !/obsidian/i.test(m.name), m.name);
+    ok('description: at most 250 characters, ending with a period', m.description.length <= 250 && m.description.endsWith('.'), String(m.description.length));
+    const versions = JSON.parse(require('node:fs').readFileSync(require.resolve('./versions.json'), 'utf8'));
+    ok('versions.json lists this version', versions[m.version] === m.minAppVersion, JSON.stringify(versions));
+  }
+
   console.log('── 3.1.2: nothing a sender sends, and no failed write, makes notes pile up ──');
   {
     // Every front-matter line must be a YAML scalar Obsidian can read: a number, a plain word, or a quoted string
