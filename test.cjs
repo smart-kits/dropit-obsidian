@@ -1132,7 +1132,8 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     // Every one of the directory's 8,599 names uses only these characters (10-09), and none says Obsidian
     ok('name: only letters, digits, spaces and - . + ( ) — the directory hid 3.1.2 for an em dash, & and a comma',
       /^[A-Za-z0-9 .+()-]+$/.test(m.name) && !/obsidian/i.test(m.name), m.name);
-    ok('description: at most 250 characters, ending with a period', m.description.length <= 250 && m.description.endsWith('.'), String(m.description.length));
+    // The directory's Short description field takes 200 (10-09: a 239-character one was cut there), and it should be the same sentence
+    ok('description: at most 200 characters, ending with a period', m.description.length <= 200 && m.description.endsWith('.'), String(m.description.length));
     const versions = JSON.parse(require('node:fs').readFileSync(require.resolve('./versions.json'), 'utf8'));
     ok('versions.json lists this version', versions[m.version] === m.minAppVersion, JSON.stringify(versions));
   }
