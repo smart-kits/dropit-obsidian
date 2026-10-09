@@ -1,10 +1,10 @@
 {
   "id": "dropit",
-  "name": "dropit",
-  "version": "3.1.1",
+  "name": "dropit — Sync Anything Across Phone, PC & Web",
+  "version": "3.1.2",
   "minAppVersion": "1.5.7",
-  "description": "Receive what you send to dropit as notes in your vault, in real time — and send notes, selections and files to your other devices.",
-  "author": "penuel",
+  "description": "Send, sync and transfer anything from anywhere into your vault: links, text, images and files from your phone, browser or another computer arrive as notes in seconds, and notes and files go back to your devices too.",
+  "author": "smart-kits",
   "isDesktopOnly": false,
   "authorUrl": "https://github.com/smart-kits"
 }

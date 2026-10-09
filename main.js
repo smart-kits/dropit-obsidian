@@ -14,6 +14,7 @@ const {
 } = obsidian;
 
 const DEFAULT_ENDPOINT = 'https://dropit.smart-kits.xyz';
+const SAFE_BASE = /^(https:\/\/[^/\s]+|http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?)(\/.*)?$/i;
 // Retrying a dropped connection: these waits, then the next address
 const RETRY_MS = [400, 1200];
 // A failed sync tries again by itself after these waits (the last one repeats)
@@ -46,6 +47,8 @@ const PAGE = 200;
 const HEARTBEAT_MS = 60_000;      // heartbeat every 60 s
 const STALE_MS = 150_000;         // silent for two heartbeats = dead connection
 const BACKOFF_MS = [1_000, 2_000, 5_000, 15_000, 30_000, 60_000];
+const STEADY_MS = 60_000;         // a connection that held this long starts the backoff over
+const TOO_MANY_WAIT_MS = 15 * 60_000;   // the account's real-time connections are full: try again after this
 const FOCUS_SYNC_MS = 10_000;     // at most one catch-up sync per 10 s of window focus changes
 const HOOK_GAP_MS = 1_000;        // between two runs of the user's command
 const DAY_MS = 86_400_000;
@@ -126,6 +129,9 @@ const STRINGS = {
     tipLiveTrial: (left) => `Receiving in real time (trial: ${left}) · click to sync now`,
     tipTrialOver: 'Real-time trial ended · syncs when Obsidian opens or you come back to it · click to sync now',
     tipTrialFull: 'Today\'s real-time spots are full, back tomorrow · click to sync now',
+    tooMany: (n) => `dropit: real-time push is paused — this account already has ${n} live connections (Obsidian on several `
+      + 'devices, or dropit watch). It tries again by itself in about 15 minutes; meanwhile new items arrive when you come back to Obsidian or sync.',
+    tipTooMany: 'Real-time paused: this account has too many live connections · tries again in about 15 minutes · click to sync now',
     // settings · not paired
     setupHeading: 'Join with a pairing code',
     haveCode: 'Pairing code',
@@ -199,7 +205,7 @@ const STRINGS = {
     serverAddress: 'Server address',
     serverAddressDesc: 'Rarely needs changing. If it stops answering, the built-in address is tried next.',
     unpair: 'Unpair',
-    unpairDesc: 'Removes this vault from your account, freeing its device slot, and clears its settings here — your items stay',
+    unpairDesc: 'Removes this vault from your account, freeing its device slot, and forgets its sign-in here — your settings and items stay',
     replacedOld: (name) => `dropit: took the place of this vault's earlier "${name}" — it no longer uses a device slot`,
     revokedReplaced: 'dropit was paired again for this vault, so this copy was signed out — pair again to use it',
     unpairButton: 'Unpair',
@@ -266,6 +272,9 @@ const STRINGS = {
     tipLiveTrial: (left) => `实时接收中（体验${left}）· 点击立即同步`,
     tipTrialOver: '实时推送体验已结束 · 打开或回到 Obsidian 时同步 · 点击立即同步',
     tipTrialFull: '今天的实时名额满了，明天自动恢复 · 点击立即同步',
+    tooMany: (n) => `dropit：实时推送暂停 —— 这个账号已经有 ${n} 条实时连接（多台设备上的 Obsidian，或 dropit watch）。`
+      + '大约 15 分钟后自己再试；在那之前，新内容在回到 Obsidian 或手动同步时拉取。',
+    tipTooMany: '实时推送暂停：这个账号的实时连接太多了 · 大约 15 分钟后再试 · 点击立即同步',
     setupHeading: '用配对码加入',
     haveCode: '配对码',
     haveCodeDesc: '在你已经在用的 dropit 客户端里生成，6 位，5 分钟内有效',
@@ -337,7 +346,7 @@ const STRINGS = {
     serverAddress: '服务地址',
     serverAddressDesc: '一般不用改。这个地址连不上时，会自动改用内置地址。',
     unpair: '解除配对',
-    unpairDesc: '把这个仓库从账号里移除、腾出一台设备的名额，并清空本机设置 —— 内容不受影响',
+    unpairDesc: '把这个仓库从账号里移除、腾出一台设备的名额，并清掉本机的登录 —— 你的设置和内容都保留',
     replacedOld: (name) => `dropit：替换了这个仓库之前的「${name}」，不再多占一台设备的名额`,
     revokedReplaced: '这个仓库重新配对过 dropit，这一份已退出 —— 要用请重新配对',
     unpairButton: '解除',
@@ -425,7 +434,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       if (this.socketFresh()) return;
       if (Date.now() - (this.lastFocusSync ?? 0) < FOCUS_SYNC_MS) return;
       this.lastFocusSync = Date.now();
-      this.sync(false);
+      this.sync(false, { why: 'focus' });
       this.heartbeat();
     };
     this.registerDomEvent(window, 'focus', onFocus);
@@ -453,7 +462,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     // Catch up and connect at the same time: done one after the other, real-time showed up only after
     // the whole catch-up and a ticket round trip. A push that lands mid-sync just queues one more sync.
     this.connect();
-    await this.sync(false);
+    await this.sync(false, { why: 'open' });
     if (Date.now() - (this.settings.endpointsCheckedAt ?? 0) > ENDPOINTS_CHECK_MS) this.refreshEndpoints();
   }
 
@@ -480,6 +489,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
    * @param {{since?: number}} opts
    */
   sync(verbose = false, opts = {}) {
+    // Why this pull happens, sent along so the server can count which kind costs what (its metrics only)
+    opts = { ...opts, why: opts.why ?? (verbose ? 'manual' : undefined) };
     if (!this.settings.token) {
       if (verbose) new Notice(t.notPaired);
       return Promise.resolve(0);
@@ -492,7 +503,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       return Promise.resolve(0);
     }
     if (this.running) {
-      this.pending = { verbose: verbose || !!this.pending?.verbose, opts: opts.since ? opts : (this.pending?.opts ?? {}) };
+      this.pending = { verbose: verbose || !!this.pending?.verbose, opts: opts.since ? opts : (this.pending?.opts ?? opts) };
       return this.running;
     }
     this.running = (async () => {
@@ -510,15 +521,21 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     return this.running;
   }
 
-  async syncOnce(verbose, { since = 0 } = {}) {
+  async syncOnce(verbose, { since = 0, why } = {}) {
     this.setStatus('syncing');
     const ctx = { written: [] };
     try {
       for (let hasMore = true; hasMore; ) {
-        const page = await this.api('GET', `/v1/pull?after=${this.settings.cursor}&limit=${PAGE}${since ? `&since=${since}` : ''}`);
+        const page = await this.api('GET', `/v1/pull?after=${this.settings.cursor}&limit=${PAGE}${since ? `&since=${since}` : ''}${why ? `&why=${why}` : ''}`);
         for (const item of page.items) {
+          // Turned off mid-sync: stop writing, and keep the place reached (a new copy of the plugin carries on from it)
+          if (this.unloaded) {
+            if (ctx.reached) { this.settings.cursor = ctx.reached; await this.save(); }
+            return ctx.written.length;
+          }
           const done = await this.deliver(item, ctx);
           if (done) ctx.written.push(done);
+          ctx.reached = item.seq;
         }
         // advance the cursor only after writing — a duplicate beats a lost item
         this.settings.cursor = page.next_after;
@@ -538,14 +555,21 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       else if (wasLost) this.connect();
     } catch (err) {
       console.error('[dropit] sync', err);
+      // Keep what this page did write (maxSeq, batches): the cursor stays put, so the page comes again, and
+      // what's at or below maxSeq is looked up in the vault instead of written twice — even after a restart
+      await this.save().catch(() => {});
       this.error = err.message;
       this.setStatus('error');
       this.syncFails = (this.syncFails ?? 0) + 1;
       window.clearTimeout(this.syncRetryTimer);
       // Removed from the account: stay on "⚠" with the reason; retrying can't help
       if (AUTH_LOST.has(err.code)) this.loseAuth(err.code);
-      // Otherwise don't sit on "⚠" until a push, a focus or a click: try again by itself, backing off
-      else if (!this.unloaded) this.syncRetryTimer = window.setTimeout(() => this.sync(false), SYNC_RETRY_MS[Math.min(this.syncFails, SYNC_RETRY_MS.length) - 1]);
+      // Otherwise don't sit on "⚠" until a push, a focus or a click: try again by itself, backing off — never sooner
+      // than the server asked (retry_after), and spread out so many vaults don't all ask in the same second
+      else if (!this.unloaded) {
+        const wait = Math.max(SYNC_RETRY_MS[Math.min(this.syncFails, SYNC_RETRY_MS.length) - 1], (Number(err.data?.retry_after) || 0) * 1000);
+        this.syncRetryTimer = window.setTimeout(() => this.sync(false, { why: 'retry' }), wait * (1 + Math.random() / 2));
+      }
       if (verbose) new Notice(`dropit: ${err.message}`);
     }
     return ctx.written.length;
@@ -583,12 +607,12 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       if (where) return item.url ? this.retryMissing(item, where, ctx) : null;
     }
     const group = groupOf(item);
-    let dest = group ? (this.settings.batches[group.id] ?? (ctx.index?.batches.has(group.id)
+    let dest = group ? (ownValue(this.settings.batches, group.id) ?? (ctx.index?.batches.has(group.id)
       ? { path: ctx.index.batches.get(group.id), kind: 'note' } : null)) : null;
     if (dest && !this.app.vault.getFileByPath(dest.path)) dest = null;
 
-    dest ??= await this.startEntry(item);
-    const out = await this.addMember(dest, item);
+    const out = dest ? await this.addMember(dest, item) : await this.startEntry(item);
+    dest = out.dest;
     if (group) this.settings.batches[group.id] = { ...dest, at: Date.now() };
     this.settings.maxSeq = Math.max(this.settings.maxSeq, seq);
     (out.missing ? ctx.index?.missing : ctx.index?.written)?.set(seq, dest.path);
@@ -620,67 +644,100 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     return { written, missing, batches };
   }
 
-  /** Create where this item (and the rest of its batch) goes. @returns {{path, kind: 'note'|'append'}} */
+  /**
+   * The first item of an entry: create where it (and the rest of its batch) goes, with the item already in it.
+   * A new note is written in one go — front matter, content, source line — so it either exists whole or not at all:
+   * a write that fails is simply tried again, never leaving a half-written note that the retry duplicates.
+   * (3.1.1 created an empty note first and filled it in after; a failure in between made a new copy on every retry.)
+   * @returns {{dest: {path, kind: 'note'|'append'}, files, missing}}
+   */
   async startEntry(item) {
     const { vault } = this.app;
+    const shared = !!groupOf(item);
     if (this.settings.mode === 'append' || this.settings.mode === 'daily') {
       const path = this.settings.mode === 'daily' ? await this.dailyNote() : await this.appendNote();
-      const file = vault.getFileByPath(path);
-      await vault.process(file, (s) => joinBlock(s, [entryHeading(item)], '\n\n'));
-      return { path, kind: 'append' };
+      const out = await this.memberLines(item, path);
+      // The time line and the item in one write, so a failure can't leave a time line behind to be repeated
+      await vault.process(vault.getFileByPath(path),
+        (s) => withSource(joinBlock(s, [entryHeading(item)], '\n\n'), out.lines, '\n', out.src, shared));
+      if (!out.missing) addToRanges(this.settings.appended, item.seq);
+      return { dest: { path, kind: 'append' }, files: out.files, missing: out.missing };
     }
     const folder = normalizePath(this.settings.folder || '/');
     await this.ensureFolder(folder);
     const base = noteTitle(item);
     let path = normalizePath(`${folder}/${base}.md`);
     for (let n = 2; vault.getAbstractFileByPath(path); n++) path = normalizePath(`${folder}/${base} ${n}.md`);
-    const group = groupOf(item);
-    await vault.create(path, [
-      '---',
-      `kind: ${group ? 'batch' : item.kind}`,
-      `source: ${yamlString(item.source)}`,
-      `created: ${new Date(item.created_at).toISOString()}`,
-      ...(group ? [`dropit_batch: ${group.id}`] : []),
-      '---',
-      '',
-    ].join('\n'));
-    return { path, kind: 'note' };
+    const out = await this.memberLines(item, path);
+    const content = withSource(frontMatter(item, out.missing ? 'dropit_missing' : 'dropit_seq'), out.lines, '\n\n', out.src, shared);
+    try {
+      await vault.create(path, content);
+    } catch (err) {
+      // A name this system won't take (Windows is strict about file names): the same note under a plain one
+      const plain = normalizePath(`${folder}/dropit ${item.seq}.md`);
+      if (path === plain || vault.getAbstractFileByPath(plain)) throw err;
+      console.error('[dropit] create', path, err);
+      path = plain;
+      if (out.missing) this.settings.missingAt[item.seq].path = path;
+      await vault.create(path, content);
+    }
+    return { dest: { path, kind: 'note' }, files: out.files, missing: out.missing };
   }
 
   /**
-   * Add one item's content to its destination.
-   * A file that fails to download **never blocks the queue**: a one-line warning takes its place, and
-   * pulling again later swaps the warning for the file. Blocking would let one undownloadable file hold
-   * back everything after it, invisibly.
+   * A later item of a batch, joining the note or entry its first item started. Front matter first, then the
+   * content: if the content write fails, trying again adds it once (the seq is only ever listed once).
+   * A front matter Obsidian can't read (edited by hand, say) doesn't stop the item — it only goes unlisted.
    */
   async addMember(dest, item) {
     const { vault, fileManager } = this.app;
     const file = vault.getFileByPath(dest.path);
-    let lines;
-    let files = [];
-    let missing = false;
-    if (item.url) {
-      try {
-        const saved = await this.saveAttachment(item, dest.path);
-        files = [saved.path];
-        lines = [`!${fileManager.generateMarkdownLink(saved, dest.path)}`];
-      } catch (err) {
-        console.error('[dropit] download failed', item.seq, err);
-        missing = true;
-        lines = [missingLine(item, err)];
-        this.settings.missingAt[item.seq] = { path: dest.path, line: lines[0] };
-      }
-    } else {
-      lines = renderBody(item);
-    }
-    if (dest.kind === 'append' && !missing) addToRanges(this.settings.appended, item.seq);
-    // The source line goes in even when the download failed: pulling again swaps only the warning line.
-    const gap = dest.kind === 'note' ? '\n\n' : '\n';
-    await vault.process(file, (s) => withSource(s, lines, gap, sourceLine(item), !!groupOf(item)));
+    const out = await this.memberLines(item, dest.path);
     if (dest.kind === 'note') {
-      await fileManager.processFrontMatter(file, (fm) => addSeq(fm, missing ? 'dropit_missing' : 'dropit_seq', item.seq));
+      try {
+        await fileManager.processFrontMatter(file, (fm) => addSeq(fm, out.missing ? 'dropit_missing' : 'dropit_seq', item.seq));
+      } catch (err) { console.error('[dropit] front matter', dest.path, err); }
     }
-    return { files, missing };
+    // The source line goes in even when the download failed: pulling again swaps only the warning line.
+    await vault.process(file, (s) => withSource(s, out.lines, dest.kind === 'note' ? '\n\n' : '\n', out.src, !!groupOf(item)));
+    if (dest.kind === 'append' && !out.missing) addToRanges(this.settings.appended, item.seq);
+    return { dest, files: out.files, missing: out.missing };
+  }
+
+  /**
+   * What one item adds: its text, or its file embedded. A file that fails to download **never blocks the queue**:
+   * a one-line warning takes its place, and pulling again later swaps the warning for the file. Blocking would let
+   * one undownloadable file hold back everything after it, invisibly.
+   */
+  async memberLines(item, notePath) {
+    const safe = this.defuser();
+    const src = sourceLine(item);
+    if (!item.url) return { lines: renderBody(item).map(safe), src: src && safe(src), files: [], missing: false };
+    try {
+      const saved = await this.saveAttachment(item, notePath);
+      return { lines: [`!${this.app.fileManager.generateMarkdownLink(saved, notePath)}`], src: src && safe(src), files: [saved.path], missing: false };
+    } catch (err) {
+      console.error('[dropit] download failed', item.seq, err);
+      const line = safe(missingLine(item, err));
+      this.settings.missingAt[item.seq] = { path: notePath, line };
+      return { lines: [line], src: src && safe(src), files: [], missing: true };
+    }
+  }
+
+  /**
+   * Templater set to run new notes as templates (its "Trigger Templater on new file creation") reads a new note
+   * a moment after it's created and runs every <% %> in it — <%* %> is any JavaScript. Text from other devices and
+   * web pages must not become code, so while that's on, `<%` is written with a zero-width space after the `<`:
+   * it looks the same and Templater doesn't see a tag. Otherwise text goes in exactly as sent.
+   * The payload handed to your command keeps the original text either way.
+   */
+  defuser() {
+    const tp = this.app.plugins?.plugins?.['templater-obsidian'];
+    if (!tp) return (s) => s;
+    let local = null;
+    try { local = this.app.loadLocalStorage?.('templater-local-settings'); } catch { /* not readable */ }
+    const runs = local?.trigger_on_file_creation ?? tp.settings?.trigger_on_file_creation;
+    return runs ? (s) => s.replace(/<%/g, '<\u200B%') : (s) => s;
   }
 
   /** Pulling again after a failed download: fetch it, and put it where the warning was. */
@@ -818,30 +875,42 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       const url = new URL(this.base() + '/v1/ws');
       url.protocol = url.protocol.replace('http', 'ws');
       url.searchParams.set('ticket', ticket);
+      // This client reads why it's being let go (the account's connections are full) and waits instead of
+      // coming straight back — so the server may tell it, rather than refuse the connection without a reason
+      url.searchParams.set('can', 'end');
 
       const socket = new WebSocket(url);
       this.socket = socket;
+      this.lastBeat = Date.now();                     // a handshake that never finishes counts as stale too
       socket.onopen = () => {
+        if (this.socket !== socket) return;
         this.connecting = false;
-        this.retry = 0;
+        this.openedAt = Date.now();
         this.realtimeWhy = null;
         this.lastBeat = Date.now();
         if (!this.running) this.setStatus('live');
+        // Back after a drop: catch up on what came in meanwhile (the first connection runs alongside start()'s sync)
+        if (this.everOpened) this.sync(false, { why: 'reconnect' });
+        this.everOpened = true;
       };
       socket.onmessage = (ev) => {
+        if (this.socket !== socket) return;
         this.lastBeat = Date.now();
         if (ev.data === 'pong') return;
-        this.sync(false);
-        // The last push of a day whose real-time spots ran out says so, and the server then closes the socket.
-        // Read it here rather than from the close: a socket the server closes can sit in CLOSING for a long time.
+        // Read the reason here rather than from the close: a socket the server closes can sit in CLOSING for a long time.
         let msg = null;
         try { msg = JSON.parse(ev.data); } catch { /* not JSON: an older server's message */ }
+        if (msg?.end === 'too_many') return void this.stopRealtime('too_many', msg.limit);
+        this.sync(false, { why: 'push' });
+        // The last push of a day whose real-time spots ran out says so, and the server then closes the socket.
         if (msg?.end === 'trial_full') this.stopRealtime('trial_full');
       };
       socket.onclose = () => {
-        if (this.socket === socket) this.socket = null;
-        this.connecting = false;
-        if (!this.unloaded && (this.state === 'live' || this.state === 'connecting')) this.setStatus('offline');
+        if (this.socket !== socket) return;         // already let go of (stale, a fresh ticket, real-time off)
+        // A connection that held a while starts the backoff over; one closed right after opening doesn't,
+        // so being let go again and again slows down instead of coming back every second
+        if (this.openedAt && Date.now() - this.openedAt >= STEADY_MS) this.retry = 0;
+        this.dropSocket();
         this.scheduleReconnect();
       };
       socket.onerror = () => socket.close();
@@ -856,15 +925,30 @@ const DropitPlugin = class DropitPlugin extends Plugin {
         return void this.setStatus('error');
       }
       if (this.state !== 'error') this.setStatus('offline');
-      this.scheduleReconnect();
+      this.scheduleReconnect(err.data?.retry_after);
     }
+  }
+
+  /** Let go of the connection without waiting for its close event: one the server closes can sit in CLOSING for a long time */
+  dropSocket() {
+    const socket = this.socket;
+    this.socket = null;
+    this.connecting = false;
+    this.openedAt = 0;
+    try { socket?.close(); } catch { /* already closed */ }
+    if (!this.unloaded && (this.state === 'live' || this.state === 'connecting')) this.setStatus('offline');
+  }
+
+  cancelReconnect() {
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectPending = false;
   }
 
   /** The key was refused (removed from the account): stop every automatic retry until a new pairing or a sync by hand. */
   loseAuth(code) {
     this.authLost = code;
     window.clearTimeout(this.syncRetryTimer);
-    window.clearTimeout(this.reconnectTimer);
+    this.cancelReconnect();
   }
 
   /**
@@ -872,14 +956,20 @@ const DropitPlugin = class DropitPlugin extends Plugin {
    * trial_full: spots are counted per UTC day, so ask again a little after midnight. Either way, say so once —
    * every heartbeat used to ask again, forever — and fall back to syncing on open, focus and by hand.
    */
-  async stopRealtime(why) {
+  async stopRealtime(why, limit) {
     this.noRealtime = true;
     this.realtimeWhy = why;
-    const socket = this.socket;
-    this.socket = null;
-    socket?.close();
-    window.clearTimeout(this.reconnectTimer);
+    this.dropSocket();
+    this.cancelReconnect();
     this.setStatus(this.error ? 'error' : 'manual');
+    if (why === 'too_many') {
+      // The account already has as many live connections as it may: say so once, and try again in a while
+      window.clearTimeout(this.retryTimer);
+      this.retryTimer = window.setTimeout(() => { this.noRealtime = false; this.connect(); }, TOO_MANY_WAIT_MS * (1 + Math.random() / 2));
+      if (!this.tooManyNoticed) new Notice(t.tooMany(limit ?? '?'), 15_000);
+      this.tooManyNoticed = true;
+      return;
+    }
     if (why === 'trial_full') {
       // Spread out over ten minutes, so everyone turned away today doesn't ask in the same second.
       const wait = DAY_MS - (Date.now() % DAY_MS) + Math.random() * 600_000;
@@ -919,9 +1009,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     const ended = left <= 0 && now - (this.lastRecheck ?? 0) > 3_600_000;
     if (!newDay && !ended) return false;
     if (ended) this.lastRecheck = now;
-    const socket = this.socket;
-    this.socket = null;
-    socket.close();
+    this.dropSocket();
     this.connect();
     return true;
   }
@@ -933,21 +1021,31 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     return left > 0 ? t.daysLeft(left < DAY_MS ? 0 : Math.ceil(left / DAY_MS)) : null;
   }
 
-  /** Exponential backoff, capped at 60 s */
-  scheduleReconnect() {
+  /**
+   * The next attempt, replacing any already waiting: exponential backoff capped at 60 s, with a random half on top
+   * so many devices that lost the server at once don't all come back in the same second, and never sooner than
+   * the server asked for (retry_after, in seconds).
+   */
+  scheduleReconnect(retryAfter) {
     if (this.unloaded || this.noRealtime || this.authLost) return;
-    const delay = BACKOFF_MS[Math.min(this.retry++, BACKOFF_MS.length - 1)];
-    window.clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
+    const base = Math.max(BACKOFF_MS[Math.min(this.retry++, BACKOFF_MS.length - 1)], (Number(retryAfter) || 0) * 1000);
+    this.cancelReconnect();
+    this.reconnectPending = true;
+    this.reconnectTimer = window.setTimeout(() => { this.reconnectPending = false; this.connect(); }, base * (1 + Math.random() / 2));
   }
 
   heartbeat() {
     if (!this.settings.token || this.noRealtime || this.unloaded) return;
     if (this.checkTrial()) return;
-    if (!this.socket) return void this.connect();
+    // Not connected: connect — unless a retry is already on its way (one attempt at a time)
+    if (!this.socket) return void (this.reconnectPending || this.connect());
+    if (Date.now() - this.lastBeat > STALE_MS) {      // silent too long, or a handshake that never finished
+      this.dropSocket();
+      return void this.scheduleReconnect();
+    }
     if (this.socket.readyState !== 1) return;          // still connecting
-    if (Date.now() - this.lastBeat > STALE_MS) return void this.socket.close();  // stale — reconnect
-    try { this.socket.send('ping'); } catch { this.socket.close(); }
+    if (Date.now() - this.openedAt >= STEADY_MS) this.tooManyNoticed = false;   // held a while: a later "full" is news again
+    try { this.socket.send('ping'); } catch { this.dropSocket(); this.scheduleReconnect(); }
   }
 
   socketFresh() {
@@ -975,6 +1073,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       this.statusEl.setAttribute('aria-label', left ? t.tipLiveTrial(left)
         : state === 'manual' && this.realtimeWhy === 'trial_over' ? t.tipTrialOver
           : state === 'manual' && this.realtimeWhy === 'trial_full' ? t.tipTrialFull
+            : state === 'manual' && this.realtimeWhy === 'too_many' ? t.tipTooMany
             : typeof tip === 'function' ? tip(this.error ?? '') : tip);
       this.statusEl.setAttribute('data-tooltip-position', 'top');
     }
@@ -993,10 +1092,11 @@ const DropitPlugin = class DropitPlugin extends Plugin {
    */
   async repull(mode, n) {
     if (mode !== 'all' && !(Number.isInteger(n) && n >= 1)) throw new Error(t.repullNumber);
+    await this.running;                              // a sync already running would write its cursor over the reset
     const res = await this.api('POST', '/v1/cursor/reset', mode === 'last' ? { last: n } : { to_seq: 0 });
     this.settings.cursor = mode === 'last' ? (res.to_seq ?? 0) : 0;
     await this.save();
-    await this.sync(true, { since: mode === 'days' ? Date.now() - n * 86_400_000 : 0 });
+    await this.sync(true, { since: mode === 'days' ? Date.now() - n * 86_400_000 : 0, why: 'repull' });
   }
 
   // ── Send ──────────────────────────────────────────────────────────────
@@ -1009,7 +1109,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     } finally {
       if (--this.sendDepth === 0 && this.heldSync) {
         this.heldSync = false;
-        this.sync(false);
+        this.sync(false, { why: 'send' });
       }
     }
   }
@@ -1084,13 +1184,16 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   /** Three steps: ask for an upload link → PUT the bytes → confirm */
   async uploadFile(file, group) {
-    const data = await this.app.vault.readBinary(file);
+    // The server checks the size first, so a file too large is refused before it's read into memory
+    const size = file.stat?.size;
+    let data = size == null ? await this.app.vault.readBinary(file) : null;
     const mime = mimeOf(file.extension);
     const start = await this.api('POST', '/v1/ingest/blob', {
       kind: mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'file',
-      filename: file.name, size: data.byteLength, mime, source: 'obsidian', client_ts: Date.now(),
+      filename: file.name, size: size ?? data.byteLength, mime, source: 'obsidian', client_ts: Date.now(),
       ...(group ? { group } : {}),
     });
+    data ??= await this.app.vault.readBinary(file);
     const put = await requestUrl({ url: start.upload_url, method: 'PUT', body: data, contentType: mime, throw: false });
     if (put.status >= 400) {                        // fail loudly, never pretend it worked
       const code = safeJson(put)?.error;
@@ -1132,7 +1235,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       noRealtimeNoticed: false, trialEndingNoticed: false, fullNoticedDay: null });
     Object.assign(this, { noRealtime: false, realtimeWhy: null, realtimeUntil: null, authLost: null });
     await this.save();
-    await this.sync(true);
+    await this.sync(true, { why: 'pair' });
     this.connect();
     this.refreshEndpoints();
   }
@@ -1150,9 +1253,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     }
     Object.assign(this.settings, { token: '', device_id: '', previous_token: previous, cursor: 0, maxSeq: 0, batches: {}, sent: [], appended: [], missingAt: {} });
     await this.save();
-    this.socket?.close();
-    this.socket = null;
-    window.clearTimeout(this.reconnectTimer);
+    this.dropSocket();
+    this.cancelReconnect();
     this.setStatus('unpaired');
   }
 
@@ -1160,7 +1262,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   /** The addresses to try, in order. The built-in one is always last, so a stale address heals itself. */
   endpointList() {
-    const list = (this.settings.endpoints ?? []).map((e) => String(e).trim().replace(/\/+$/, '')).filter(Boolean);
+    // Only addresses worth sending the key to: https, or this machine (running the service locally)
+    const list = (this.settings.endpoints ?? []).map((e) => String(e).trim().replace(/\/+$/, '')).filter((e) => SAFE_BASE.test(e));
     return [...new Set([...list, DEFAULT_ENDPOINT])];
   }
 
@@ -1309,7 +1412,26 @@ async function deviceKeyOf(app, store) {
     return undefined;
   }
 }
-const yamlString = (s) => (/^[\w .@/-]*$/.test(String(s)) ? String(s) : JSON.stringify(String(s)));
+/** A front-matter value: as is when YAML can't misread it, otherwise a quoted string (JSON's quoting is valid YAML) */
+const yamlValue = (v) => (/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(String(v)) ? String(v) : JSON.stringify(String(v)));
+
+/** A new note's front matter, written with the note: the same keys a later item adds to with processFrontMatter */
+function frontMatter(item, seqKey) {
+  const group = groupOf(item);
+  return [
+    '---',
+    `kind: ${yamlValue(group ? 'batch' : item.kind)}`,
+    `source: ${yamlValue(item.source)}`,
+    `created: ${new Date(item.created_at).toISOString()}`,
+    ...(group ? [`dropit_batch: ${yamlValue(group.id)}`] : []),
+    `${seqKey}: ${Number(item.seq)}`,
+    '---',
+    '',
+  ].join('\n');
+}
+
+/** obj[key] only when obj has it itself: a batch id like "constructor" must not find something on the prototype */
+const ownValue = (obj, key) => (Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined);
 
 function groupOf(item) {
   const g = item.meta?.group;
@@ -1318,14 +1440,42 @@ function groupOf(item) {
 
 const batchId = () => 'b' + [...crypto.getRandomValues(new Uint8Array(9))].map((x) => x.toString(36).padStart(2, '0')).join('');
 
-/** Characters that break a file name on some OS, or a [[link]] in Obsidian */
-const sanitize = (name) => String(name).replace(/[/\\:*?"<>|#^[\]]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120) || 'file';
+// Control characters (C0, DEL, C1): no system wants them in a file name, and Windows refuses them
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/**
+ * At most `chars` characters and `bytes` UTF-8 bytes, cut between characters (never inside an emoji),
+ * keeping a file extension when asked. Android and Linux allow 255 bytes in a name; Chinese takes 3 a character.
+ */
+function cut(s, chars, bytes = Infinity, keepExt = false) {
+  const fits = (x) => Array.from(x).length <= chars && new TextEncoder().encode(x).byteLength <= bytes;
+  if (fits(s)) return s;
+  const ext = keepExt ? /\.[A-Za-z0-9]{1,8}$/.exec(s)?.[0] ?? '' : '';
+  const stem = Array.from(s.slice(0, s.length - ext.length));
+  while (stem.length && !fits(stem.join('') + ext)) stem.pop();
+  return stem.join('') + ext;
+}
+
+/**
+ * A name every system takes, that doesn't break a [[link]]: no reserved or control characters, no dots or spaces
+ * at the end (Windows drops them), not a name Windows keeps for devices (CON, NUL, COM1…).
+ */
+function sanitize(name, chars = 120, keepExt = true) {
+  let s = String(name).replace(CONTROL, ' ').replace(/[/\\:*?"<>|#^[\]]/g, '_').replace(/\s+/g, ' ').trim();
+  s = cut(s, chars, 200, keepExt).replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(s)) s = `_${s}`;
+  return s || 'file';
+}
 
 /** `09-29 15.30 the start of the text` — readable in the file list, sorted by time */
 function noteTitle(item) {
   const d = new Date(item.created_at);
   const when = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}.${pad(d.getMinutes())}`;
-  return `${when} ${sanitize(topic(item)).slice(0, 40).trim()}`.trim();
+  // A title, not a file name: characters a name can't hold that only decorate (quotes, brackets, <>) are dropped
+  // rather than turned into "_" — `<% "PWNED" %>` reads `% PWNED %`, `A [great] page` reads `A great page`.
+  // The ones that separate (/ \ :) still become "_", so example.com/a/b stays example.com_a_b.
+  const about = String(topic(item)).replace(/[<>"*?|#^[\]]/g, '');
+  return `${when} ${about.trim() ? sanitize(about, 40, false) : ''}`.trim();
 }
 
 function topic(item) {
@@ -2017,4 +2167,4 @@ class Confirm extends Modal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });
+Object.assign(module.exports, { deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl });

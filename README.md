@@ -95,7 +95,7 @@ One glance tells you the state; click it to sync now.
 | `↻ dropit` | Syncing |
 | `○ dropit` | No real-time on your plan right now: syncs when Obsidian opens or you come back to it |
 | `○ dropit · offline` | Disconnected — reconnecting by itself |
-| `⚠ dropit` | Something failed — hover for why; it tries again by itself (5 s, 15 s, then every minute). If this vault was removed from your account, it stops trying until you pair again or click to sync |
+| `⚠ dropit` | Something failed — hover for why; it tries again by itself (after about 5 s, 15 s, then every minute — later if the server asks for that). If this vault was removed from your account, it stops trying until you pair again or click to sync |
 | `dropit · not paired` | Click to set it up |
 
 When items arrive, one notice says how many — click it to open the last one.
@@ -180,7 +180,7 @@ module.exports = async ({ app }) => {
 
 ## Set up
 
-1. **Install.** Not in the Community Plugins directory yet. Either download it from
+1. **Install.** *Settings → Community plugins → Browse*, search **dropit**, *Install*. Or download it from
    [dropit.smart-kits.xyz](https://dropit.smart-kits.xyz) and unzip it into `<your vault>/.obsidian/plugins/`,
    or clone it there:
 
@@ -235,6 +235,12 @@ The interface follows Obsidian's language: English, or Simplified Chinese when O
 
 - The sign-in is stored in this plugin's `data.json` inside your vault. **If you sync or publish your vault,
   exclude `.obsidian/plugins/dropit/data.json`.** *Unpair* clears it.
+  A synced vault that takes `data.json` along (Obsidian Sync with community plugin settings, iCloud, Syncthing, Git)
+  also makes every copy receive as the same device, so an item can be written once by each copy. Let one copy receive:
+  keep `data.json` out of the sync.
+- Text from other devices and web pages is never run as code. If Templater is set to run new notes as templates
+  (*Trigger Templater on new file creation*), `<%` in what arrives is written with an invisible zero-width space after
+  the `<`, so Templater doesn't see a command in it. It looks the same; the payload your command gets keeps the original.
 - Each device has its own key and can be removed on its own; removing one frees its slot at once.
 - Pairing this vault again (for example after reinstalling the plugin) takes the earlier pairing's place instead of
   using another slot. To recognize it, the plugin sends the key it had, if any, and a SHA-256 hash of a random ID.

@@ -89,7 +89,9 @@ function makeVault() {
     const m = /^---\n([\s\S]*?)\n---/.exec(s);
     if (!m) return;
     const o = {};
-    for (const line of m[1].split('\n')) { const [k, ...v] = line.split(': '); o[k] = v.join(': '); }
+    // Like YAML: a number reads as a number, a double-quoted value as the string inside
+    const value = (v) => (/^-?\d+$/.test(v) ? Number(v) : v.startsWith('"') ? JSON.parse(v) : v);
+    for (const line of m[1].split('\n')) { const [k, ...v] = line.split(': '); o[k] = value(v.join(': ')); }
     fm.set(path, o);
   };
   const vault = {
@@ -313,7 +315,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('its title is the host and path', noteTitle(url) === '09-17 08.00 example.com_a_b', noteTitle(url));
     const rich = { ...url, meta: { title: 'A [great] page', description: 'line one\nline two' } };
     ok('with a title: a link, then the description quoted', renderText(rich).join('\n') === '[A great page](https://example.com/a/b)\n\n> line one\n> line two', renderText(rich).join('\n'));
-    ok('the note is named after the title', noteTitle(rich) === '09-17 08.00 A _great_ page', noteTitle(rich));
+    ok('the note is named after the title (brackets dropped, not turned into _)', noteTitle(rich) === '09-17 08.00 A great page', noteTitle(rich));
     ok('long titles are cut to 40 characters', noteTitle(text(41, 'x'.repeat(80))).length === '09-17 08.00 '.length + 40);
   }
 
@@ -451,7 +453,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       serve({ 'GET /v1/pull': pages([rich, text(72, 'plain')]) });
       await p.sync(false);
       ok('a link with title and description: unchanged, no source line',
-        files.get('Inbox/09-17 08.00 A _great_ page.md')?.endsWith('---\n\n[A great page](https://example.com/a/b)\n\n> line one\n> line two\n'), JSON.stringify(files.get('Inbox/09-17 08.00 A _great_ page.md')));
+        files.get('Inbox/09-17 08.00 A great page.md')?.endsWith('---\n\n[A great page](https://example.com/a/b)\n\n> line one\n> line two\n'), JSON.stringify(files.get('Inbox/09-17 08.00 A great page.md')));
       ok('an item without meta: unchanged', files.get('Inbox/09-17 08.00 plain.md')?.endsWith('---\n\nplain\n'), JSON.stringify(files.get('Inbox/09-17 08.00 plain.md')));
     }
 
@@ -511,11 +513,12 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     q.settings.endpoints = [];
     let down = true, tries = 0;
     serve({ 'GET /v1/pull': () => { tries++; return down ? new Error('net::ERR_CONNECTION_CLOSED') : { json: { items: [], has_more: false, next_after: 0 } }; } });
-    window.setTimeout = (fn, ms) => { timers.push(ms); if (ms !== 5_000) setImmediate(fn); else held = fn; return 0; };
+    const firstRetry = (ms) => ms >= 5_000 && ms <= 7_500;      // 5 s plus up to half again, so vaults don't all retry together
+    window.setTimeout = (fn, ms) => { timers.push(ms); if (!firstRetry(ms)) setImmediate(fn); else held = fn; return 0; };
     let held = null;
     timers.length = 0;
     await q.sync(false);
-    ok('a failed sync shows the error and schedules a retry in 5 s', q.state === 'error' && timers.includes(5_000) && held, `${q.state} · ${JSON.stringify(timers)}`);
+    ok('a failed sync shows the error and schedules a retry in 5–7.5 s', q.state === 'error' && timers.some(firstRetry) && held, `${q.state} · ${JSON.stringify(timers)}`);
     down = false;
     held();
     for (let i = 0; i < 5; i++) await settle();
@@ -1120,6 +1123,230 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     serve({ 'GET /v1/me': () => ({ status: 403, json: { error: 'DEVICE_REVOKED', reason: 'replaced' } }) });
     const err = await r.api('GET', '/v1/me').catch((e) => e);
     ok('DEVICE_REVOKED + replaced reads as "paired again", not "removed"', /paired again/.test(err.message), err.message);
+  }
+
+  console.log('── 3.1.2: nothing a sender sends, and no failed write, makes notes pile up ──');
+  {
+    // Every front-matter line must be a YAML scalar Obsidian can read: a number, a plain word, or a quoted string
+    const scalar = /^(-?\d+|[A-Za-z0-9][A-Za-z0-9_.:+-]*|"(?:[^"\\]|\\.)*")$/;
+    const fmLines = (s) => /^---\n([\s\S]*?)\n---/.exec(s)[1].split('\n');
+    const { p, files, fm } = await makePlugin();
+    const g = { group: { id: 'a: b', i: 1, n: 2 } };
+    serve({ 'GET /v1/pull': pages([text(60, 'odd fields', { kind: 'note: x', source: '@phone', meta: g })]) });
+    await p.sync(false);
+    const note = [...files.keys()].find((k) => k.endsWith('.md'));
+    ok('odd kind, source and batch id: one note, and every front-matter value is one YAML can read',
+      [...files.keys()].length === 1 && fmLines(files.get(note)).every((l) => scalar.test(l.split(': ').slice(1).join(': '))), files.get(note));
+    ok('…values come back exactly as sent', fm.get(note).source === '@phone' && fm.get(note).dropit_batch === 'a: b', JSON.stringify(fm.get(note)));
+    ok('…and the seq is in the note from the start (written in one go)', fm.get(note).dropit_seq === 60 && p.settings.cursor === 60, JSON.stringify(fm.get(note)));
+  }
+  {
+    // The second item of a batch fails to write once: trying again adds it once, and no second note appears
+    const { p, files, fm, vault } = await makePlugin();
+    const g = (i) => ({ group: { id: 'bCCCCCCCC', i, n: 2 } });
+    const items = [text(61, 'first half', { meta: g(1) }), text(62, 'second half', { meta: g(2) })];
+    serve({ 'GET /v1/pull': () => ({ json: { items, has_more: false, next_after: 62 } }) });
+    const process = vault.process;
+    let failOnce = true;
+    vault.process = async (f, fn) => { if (failOnce) { failOnce = false; throw new Error('EBUSY: file is locked'); } return process(f, fn); };
+    await p.sync(false);
+    ok('a write fails mid-batch: the sync reports it and the cursor stays', p.state === 'error' && p.settings.cursor === 0, `${p.state} ${p.settings.cursor}`);
+    ok('…what was written is saved (maxSeq), so even after a restart it is looked up, not written again', p.stored.maxSeq === 61, JSON.stringify(p.stored.maxSeq));
+    const again = await makePlugin({}, p.stored);            // Obsidian restarted: settings from disk, the same vault
+    for (const [k, v] of files) again.files.set(k, v);
+    for (const [k, v] of fm) again.fm.set(k, { ...v });
+    serve({ 'GET /v1/pull': () => ({ json: { items, has_more: false, next_after: 62 } }) });
+    await again.p.sync(false);
+    const notes = [...again.files.keys()].filter((k) => k.endsWith('.md'));
+    ok('…trying again: still one note', notes.length === 1, notes.join());
+    ok('…with each half once', (again.files.get(notes[0]).match(/first half/g) ?? []).length === 1
+      && (again.files.get(notes[0]).match(/second half/g) ?? []).length === 1, JSON.stringify(again.files.get(notes[0])));
+  }
+  {
+    // A name this system won't take: the note is made under a plain name, and what comes after still arrives
+    const { p, files, vault } = await makePlugin();
+    const create = vault.create;
+    vault.create = async (path, s) => { if (path.includes('BAD')) throw new Error('EINVAL: invalid file name'); return create(path, s); };
+    serve({ 'GET /v1/pull': pages([text(63, 'BAD name'), text(64, 'after it')]) });
+    await p.sync(false);
+    ok('a file name the system refuses: the note is made as "dropit <seq>.md"', files.has('Inbox/dropit 63.md') && files.get('Inbox/dropit 63.md').includes('BAD name'), [...files.keys()].join());
+    ok('…and the next item arrives', files.has('Inbox/09-17 08.00 after it.md') && p.settings.cursor === 64, [...files.keys()].join());
+  }
+
+  console.log('── 3.1.2: received text never runs as a Templater template ──');
+  {
+    const local = (on) => ({ plugins: { plugins: { 'templater-obsidian': { settings: {} } } },
+      loadLocalStorage: (k) => (k === 'templater-local-settings' ? { trigger_on_file_creation: on } : null) });
+    const sent = '<%* require("child_process").exec("x") %> and <% tp.date.now() %>';
+    const on = await makePlugin({}, undefined, local(true));
+    serve({ 'GET /v1/pull': pages([text(70, sent, { meta: { from: { url: 'https://evil.example/', title: '<%* evil() %>' } } })]) });
+    await on.p.sync(false);
+    const body = [...on.files.values()][0];
+    ok('Templater runs new notes as templates: no <% reaches the note', !body.includes('<%') && body.includes('<​%*'), JSON.stringify(body));
+    ok('…not in the source line either', !/— \[<%/.test(body), JSON.stringify(body));
+    ok('…while your command gets the text as sent', on.events.at(-1)?.payload.text === sent, JSON.stringify(on.events.at(-1)?.payload.text));
+    const off = await makePlugin({}, undefined, local(false));
+    serve({ 'GET /v1/pull': pages([text(71, sent)]) });
+    await off.p.sync(false);
+    ok('Templater installed but not running new notes: the text goes in exactly as sent', [...off.files.values()][0].includes(sent));
+    const none = await makePlugin();
+    serve({ 'GET /v1/pull': pages([text(72, sent)]) });
+    await none.p.sync(false);
+    ok('no Templater: exactly as sent', [...none.files.values()][0].includes(sent));
+  }
+
+  console.log('── 3.1.2: names every system takes ──');
+  {
+    const { sanitize, noteTitle } = DropitPlugin;
+    const title = noteTitle(text(80, '\x1b[31mred\x07 alert'));
+    ok('control characters never reach a note name', !/[\u0000-\u001f\u007f-\u009f]/.test(title) && title.includes('red'), JSON.stringify(title));
+    const emoji = sanitize('😀'.repeat(130));
+    ok('cut between characters, never inside an emoji', !/[\ud800-\udbff](?![\udc00-\udfff])/.test(emoji) && Array.from(emoji).length <= 120, String(emoji.length));
+    const zh = sanitize('会议纪要'.repeat(40) + '.pdf');
+    ok('a long Chinese file name fits 200 bytes (Android allows 255) and keeps .pdf', new TextEncoder().encode(zh).byteLength <= 200 && zh.endsWith('.pdf'), zh.slice(-6));
+    ok('names Windows keeps for devices get a prefix', sanitize('CON.png') === '_CON.png' && sanitize('nul') === '_nul', sanitize('CON.png'));
+    ok('no dots or spaces at the end (Windows drops them)', sanitize('notes. . .') === 'notes', JSON.stringify(sanitize('notes. . .')));
+    ok('an ordinary name is unchanged', sanitize('IMG_1587.jpg') === 'IMG_1587.jpg');
+  }
+
+  {
+    const { noteTitle } = DropitPlugin;
+    ok('a title keeps what reads: quotes and <> dropped, not turned into _', noteTitle(text(81, '<% "PWNED" %>')) === '09-17 08.00 % PWNED %', noteTitle(text(81, '<% "PWNED" %>')));
+    ok('…a path still reads as one', noteTitle(text(82, 'https://example.com/a/b', { kind: 'url' })) === '09-17 08.00 example.com_a_b');
+    ok('…nothing left but symbols: just the time', noteTitle(text(83, '"<>"')) === '09-17 08.00', noteTitle(text(83, '"<>"')));
+  }
+
+  console.log('── 3.1.2: each pull says why it happens (the server counts them; nothing else changes) ──');
+  {
+    const { p } = await makePlugin();
+    const calls = serve({ 'GET /v1/pull': pages(), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+    const whyOf = () => new URLSearchParams(calls.filter((c) => c.path.startsWith('/v1/pull')).at(-1).path.split('?')[1]).get('why');
+    await p.sync(true);
+    ok('by hand: manual', whyOf() === 'manual', whyOf());
+    await p.sync(false, { why: 'focus' });
+    ok('coming back to the window: focus', whyOf() === 'focus', whyOf());
+    await p.start();
+    ok('opening: open', calls.some((c) => /[?&]why=open\b/.test(c.path)), JSON.stringify(calls.map((c) => c.path)));
+    await p.repull('all');
+    ok('pulling again: repull', whyOf() === 'repull', whyOf());
+  }
+
+  console.log('── 3.1.2: stopped mid-sync, sending, addresses ──');
+  {
+    const { p, files, vault } = await makePlugin();
+    const create = vault.create;
+    vault.create = async (path, s) => { const r = await create(path, s); p.unloaded = true; return r; };   // turned off right after the first note
+    serve({ 'GET /v1/pull': pages([text(90, 'one'), text(91, 'two'), text(92, 'three')]) });
+    await p.sync(false);
+    ok('turned off mid-sync: no more notes are written', [...files.keys()].length === 1, [...files.keys()].join());
+    ok('…and the place reached is kept, so the next copy carries on from it', p.stored.cursor === 90, String(p.stored.cursor));
+  }
+  {
+    const { p, vault } = await makePlugin();
+    let reads = 0;
+    vault.readBinary = async () => { reads++; return new ArrayBuffer(8); };
+    serve({ 'POST /v1/ingest/blob': () => ({ status: 413, json: { error: 'PAYLOAD_TOO_LARGE', field: 'size', limit: 5 << 20 } }) });
+    notices.length = 0;
+    await p.sendFiles([{ path: 'big.mov', name: 'big.mov', extension: 'mov', stat: { size: 900 << 20 } }]);
+    ok('a file too large is refused before it is read into memory', reads === 0 && notices.some((n) => /big\.mov/.test(n)), `${reads} ${JSON.stringify(notices)}`);
+  }
+  {
+    const { p } = await makePlugin({ endpoints: ['http://evil.example', 'http://127.0.0.1:8799', 'https://ok.example'] });
+    const list = p.endpointList();
+    ok('the key only goes to https addresses (or this machine)', !list.includes('http://evil.example') && list[0] === 'http://127.0.0.1:8799'
+      && list.includes('https://ok.example'), JSON.stringify(list));
+  }
+
+  console.log('── 3.1.2: real-time never comes back faster while something is wrong ──');
+  // Plugins from earlier tests are still around: count only this test's own requests (by its key)
+  const ticketsOf = (token) => {
+    const count = { n: 0 };
+    net = async (req) => {
+      const { pathname } = new URL(req.url);
+      if (pathname === '/v1/ws/ticket') {
+        if (req.headers?.authorization === `Bearer ${token}`) count.n++;
+        return { status: 200, json: { ticket: 't', realtime_until: null } };
+      }
+      return { status: 200, json: { items: [], has_more: false, next_after: 0 } };
+    };
+    return count;
+  };
+  {
+    globalThis.WebSocket = class { constructor(u) { this.url = String(u); this.readyState = 0; } close() { this.closed = true; } send() {} };
+    const setTimeout = window.setTimeout;
+    const held = [];
+    window.setTimeout = (fn, ms) => { timers.push(ms); held.push({ fn, ms }); return held.length; };   // nothing fires unless the test says so
+    try {
+      const { p } = await makePlugin({ token: 'dk_rt1' });
+      const tickets = ticketsOf('dk_rt1');
+      await p.connect();
+      const first = p.socket;
+      ok('the connection asks to be told why it is let go (can=end)', /[?&]can=end\b/.test(first.url), first.url);
+      first.readyState = 1; first.onopen();
+      timers.length = 0; notices.length = 0;
+      first.onmessage({ data: JSON.stringify({ type: 'end', end: 'too_many', limit: 12 }) });
+      ok('told the account\'s connections are full: real-time pauses and says why, once', p.noRealtime && p.realtimeWhy === 'too_many'
+        && notices.filter((n) => /paused/.test(n)).length === 1, JSON.stringify(notices));
+      ok('…and tries again in about 15 minutes, not sooner', timers.length === 1 && timers[0] >= 15 * 60_000 && timers[0] <= 22.5 * 60_000, JSON.stringify(timers));
+      const before = tickets.n;
+      p.heartbeat(); p.heartbeat();
+      ok('…the heartbeat leaves it alone meanwhile', tickets.n === before, String(tickets.n - before));
+      held[p.retryTimer - 1].fn(); for (let i = 0; i < 4; i++) await settle();   // 15 minutes later
+      const second = p.socket;
+      ok('…then it connects again', second && second !== first, String(!!second));
+      second.readyState = 1; second.onopen();
+      second.onmessage({ data: JSON.stringify({ type: 'end', end: 'too_many', limit: 12 }) });
+      ok('…full again: no second notice', notices.filter((n) => /paused/.test(n)).length === 1, JSON.stringify(notices));
+    } finally { window.setTimeout = setTimeout; delete globalThis.WebSocket; }
+  }
+  {
+    globalThis.WebSocket = class { constructor() { this.readyState = 0; } close() { this.closed = true; } send() {} };
+    const setTimeout = window.setTimeout;
+    const held = [];
+    window.setTimeout = (fn, ms) => { timers.push(ms); held.push({ fn, ms }); return held.length; };
+    try {
+      const { p } = await makePlugin({ token: 'dk_rt2' });
+      const tickets = ticketsOf('dk_rt2');
+      const waits = [];
+      let extra = 0;
+      for (let round = 0; round < 8; round++) {
+        if (!p.socket) await p.connect();
+        const s = p.socket;
+        s.readyState = 1; s.onopen();
+        timers.length = 0;
+        s.readyState = 3; s.onclose();                          // let go right after opening, over and over
+        waits.push(timers.at(-1));
+        const asked = tickets.n;
+        p.heartbeat(); p.heartbeat();                           // a retry is on its way: the heartbeat must not start another
+        for (let i = 0; i < 4; i++) await settle();
+        if (tickets.n !== asked) extra++;
+        held[p.reconnectTimer - 1].fn(); for (let i = 0; i < 4; i++) await settle();
+      }
+      ok('let go right after opening, again and again: the wait grows to a minute instead of staying at a second',
+        waits[0] < 1_600 && waits.at(-1) >= 60_000, JSON.stringify(waits.map(Math.round)));
+      ok('…and the heartbeat never asks while a retry is waiting (3.1.1 asked on both: twice a minute)', extra === 0 && tickets.n === waits.length + 1, `${extra} ${tickets.n}`);
+
+      // Silent too long: let go at once and retry, without waiting for a close event that may never come
+      if (!p.socket) await p.connect();
+      const stale = p.socket;
+      stale.readyState = 1; stale.onopen();
+      p.lastBeat = Date.now() - 10 * 60_000;
+      timers.length = 0;
+      p.heartbeat();
+      ok('a silent connection is let go at once and a retry scheduled (no waiting for onclose)', stale.closed && p.socket === null && timers.length === 1, JSON.stringify(timers));
+    } finally { window.setTimeout = setTimeout; delete globalThis.WebSocket; }
+  }
+  {
+    globalThis.WebSocket = class { constructor() { this.readyState = 0; } close() {} send() {} };
+    const setTimeout = window.setTimeout;
+    window.setTimeout = (fn, ms) => { timers.push(ms); return 0; };
+    try {
+      const { p } = await makePlugin();
+      serve({ 'POST /v1/ws/ticket': () => ({ status: 503, json: { error: 'GLOBAL_CIRCUIT_OPEN', retry_after: 3600 } }), 'GET /v1/pull': pages() });
+      timers.length = 0;
+      await p.connect();
+      ok('the server says come back in an hour: the next try waits at least that long', timers.length === 1 && timers[0] >= 3_600_000, JSON.stringify(timers));
+    } finally { window.setTimeout = setTimeout; delete globalThis.WebSocket; }
   }
 
   console.log(`\n${fail === 0 ? '✅' : '🛑'}  ${pass} passed, ${fail} failed\n`);

@@ -92,7 +92,7 @@ dropit_seq: 42
 | `↻ dropit` | 正在同步 |
 | `○ dropit` | 你的套餐现在没有实时推送：打开或回到 Obsidian 时同步 |
 | `○ dropit · 已断开` | 断开了，正在自己重连 |
-| `⚠ dropit` | 出了问题 —— 悬停看原因；它会自己重试（5 秒、15 秒，之后每分钟）。如果这个 vault 已被从账号里移除，就不再重试，等你重新配对或点它手动同步 |
+| `⚠ dropit` | 出了问题 —— 悬停看原因；它会自己重试（大约 5 秒、15 秒，之后每分钟；服务器要求等更久就等更久）。如果这个 vault 已被从账号里移除，就不再重试，等你重新配对或点它手动同步 |
 | `dropit · 未配对` | 点它开始设置 |
 
 收到内容时，弹一条提示告诉你收到了几条 —— 点它直接打开最后那篇。
@@ -170,7 +170,7 @@ module.exports = async ({ app }) => {
 
 ## 装好它
 
-1. **安装。** 还没进社区插件市场。从 [dropit.smart-kits.xyz](https://dropit.smart-kits.xyz) 下载，
+1. **安装。** 「设置 → 第三方插件 → 浏览」，搜索 **dropit**，点「安装」。也可以从 [dropit.smart-kits.xyz](https://dropit.smart-kits.xyz) 下载，
    解压到 `<你的 vault>/.obsidian/plugins/`；或者直接 clone 到那里：
 
    ```bash
@@ -223,6 +223,10 @@ Ask me which vault and before creating an account, and never show or commit my t
 
 - 登录信息存在 vault 里这个插件的 `data.json` 中。**如果你同步或公开 vault，请排除
   `.obsidian/plugins/dropit/data.json`。** 「解除配对」会清掉它。
+  vault 同步时如果把 `data.json` 一起带过去（开了「第三方插件设置」的 Obsidian 同步、iCloud、Syncthing、Git），
+  每一份都会以同一台设备的身份接收，同一条内容可能每一份各写一次。让其中一份负责接收：把 `data.json` 排除在同步之外。
+- 来自别的设备和网页的文字不会被当成代码执行。如果 Templater 设置了新建笔记时当模板运行（*Trigger Templater on new file creation*），
+  收到内容里的 `<%` 会在 `<` 后面加一个看不见的零宽空格写入，Templater 就不会把它当成命令。看起来一样；交给你命令的 payload 保留原文。
 - 每台设备有自己的钥匙，可以单独移除；移除后名额立刻释放。
 - 这个 vault 重新配对（比如重装插件之后）会替换之前那次配对，不再多占名额。为了认出来，插件会带上它原来的钥匙（如果还有），
   以及一个随机 ID 的 SHA-256 摘要。这个 ID 在这个 vault 第一次加入 dropit 时生成，存在 Obsidian 为这台设备上这个 vault 单独保留的本地存储里 ——
