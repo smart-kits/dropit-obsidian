@@ -166,10 +166,15 @@ module.exports = async ({ app }) => {
 
 - **A dropit account is required.** Creating one is free, in the plugin (*First time using dropit? → Create a new account*)
   or at [dropit.smart-kits.xyz](https://dropit.smart-kits.xyz). It asks for no name, email or phone number.
-- **Some limits depend on your plan.** Everything described here works on the free plan, within its limits:
+- **Free to use; an optional paid plan raises the limits.** Everything described here works on the free plan, within its limits:
   30 items a day, files up to 5 MB, items kept for 1 day, 3 devices, and real-time delivery for the first 10 days
   after signing up. After that, new items come in when Obsidian opens, when you come back to its window, or when you
-  click *Sync now*. The paid plan raises the limits and keeps real-time delivery on.
+  click *Sync now*.
+- **Payment.** The paid plan costs $1.90 a month, $9.90 a year, or $29.90 once for lifetime (limited), plus local tax:
+  300 items a day, files up to 100 MB, 10 devices, items kept 10 days, real-time delivery always on.
+  You pay on the website ([pricing](https://dropit.smart-kits.xyz/#pricing)), never inside the plugin, and the plugin works the same
+  either way. Checkout asks for an email, where the receipt goes. Cancel anytime; any payment can be refunded within 7 days
+  ([terms](https://dropit.smart-kits.xyz/terms)).
 - **Network use.** The plugin talks to one service, the dropit server, over HTTPS and a WebSocket, to send and
   receive your items. No telemetry, no ads. Details in [Privacy](#privacy).
 - **Files.** It reads and writes only inside this vault. It doesn't scan your notes: only when an item comes back a
