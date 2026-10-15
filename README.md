@@ -157,6 +157,33 @@ module.exports = async ({ app }) => {
 };
 ```
 
+### A complete example: an AI summary under every text that arrives
+
+[`recipes/ai-summary.quickadd.js`](recipes/ai-summary.quickadd.js) is a ready-made QuickAdd user script.
+A text you send becomes a note as usual; a few seconds later a summary appears under it:
+
+```md
+Thursday 3pm: meeting with the supplier. Bring last quarter's quotes and the new delivery schedule…
+
+> [!summary] AI · #42
+> - Supplier meeting Thursday 3pm; bring the quotes and the delivery schedule.
+> - Send the minutes to legal afterwards.
+```
+
+It hands the text to a command-line agent you already have (Claude Code, Codex CLI, …) on **stdin**, with
+**no tools**: the agent can read the text and answer, nothing else. To set it up:
+
+1. Copy the file into your vault, for example `Scripts/ai-summary.quickadd.js`. At its top, set `AGENT` to
+   the full path of your agent (`which claude` in a terminal) — Obsidian started from the Dock doesn't see
+   your shell's `PATH`.
+2. QuickAdd → add a **Macro** choice → configure it → **User Scripts** → pick the file. Turn on the ⚡ next
+   to the macro so it becomes a command.
+3. *Settings → dropit → Run a command after receiving* → pick that command.
+
+Desktop only. The plugin itself does none of this — it only hands the item over; the agent, the prompt and
+what happens to the answer are yours to change. Checked end to end on Obsidian 1.12.7 with QuickAdd 2.12.3
+and Claude Code.
+
 > **Treat the content as untrusted input.** Anyone holding a send-only token for your account — an
 > old phone, a leaked shortcut — can put anything into it. Don't `eval` it, and never build a shell
 > command line out of it: pass it to a program on **stdin** or in a file. The object is frozen, so a

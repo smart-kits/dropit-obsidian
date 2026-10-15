@@ -151,6 +151,30 @@ module.exports = async ({ app }) => {
 };
 ```
 
+### 一个完整的例子：每段文字到了，下面自动出现 AI 的总结
+
+[`recipes/ai-summary.quickadd.js`](recipes/ai-summary.quickadd.js) 是一份现成的 QuickAdd 用户脚本。
+你投的文字照常变成一篇笔记；几秒之后，总结出现在它下面：
+
+```md
+周四下午三点和供应商开会，要带上季度的报价单和新的交付时间表……
+
+> [!summary] AI · #42
+> - 周四下午三点与供应商开会，带上季度报价单和新的交付时间表。
+> - 会后把纪要发给法务。
+```
+
+它把文字经 **stdin** 交给你电脑上已有的命令行 agent（Claude Code、Codex CLI……），而且**不给任何工具**：
+agent 只能读这段文字、给出回答，别的什么都做不了。设置：
+
+1. 把这个文件复制进 vault，比如 `Scripts/ai-summary.quickadd.js`。把文件开头的 `AGENT` 改成你的 agent 的完整路径
+   （终端里 `which claude`）—— 从程序坞启动的 Obsidian 看不到你 shell 里的 `PATH`。
+2. QuickAdd → 新建一个 **Macro** → 配置 → **User Scripts** → 选这个文件。把这个宏旁边的 ⚡ 打开，它就成了一个命令。
+3. 「设置 → dropit → 收到后运行的命令」→ 选这个命令。
+
+仅桌面端。这些都不是插件做的 —— 插件只负责把这一条交出去；用哪个 agent、怎么提示、拿到回答之后做什么，都归你改。
+在 Obsidian 1.12.7 + QuickAdd 2.12.3 + Claude Code 上从头到尾跑通过。
+
 > **把内容当作不可信的输入。** 任何拿着你账号「只能投递」钥匙的东西 —— 一部旧手机、一个泄露的快捷指令 ——
 > 都能往里放任何内容。别 `eval` 它，也永远别用它拼 shell 命令行：通过 **stdin** 或文件交给程序。
 > 这个对象是冻结的，一个脚本改不了下一个脚本看到的内容。
