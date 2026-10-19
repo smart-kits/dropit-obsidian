@@ -25,9 +25,30 @@ Desktop and mobile. Part of [dropit](https://github.com/smart-kits/dropit-client
 And the other way: right-click a note, a PDF or a few images in the file list → *Send to dropit*,
 and they're on your phone.
 
+## The other devices, and how they find each other
+
+The plugin is one device of one account; the other devices are other dropit clients, joined to the same account. Pick what fits each device
+(the install page [dropit.smart-kits.xyz](https://dropit.smart-kits.xyz) recommends one for whatever you open it on):
+
+| Device | Client | Sends | Receives | Get it |
+|---|---|---|---|---|
+| **iPhone · iPad** | The **dropit** shortcut (share sheet, Back Tap) | ✓ | — (read it here in Obsidian mobile, or in the web inbox in Safari) | Open the site in Safari → *Install the shortcut* |
+| **Android** | The dropit app | ✓ | ✓ (a notification) | The APK on the site or in [Releases](https://github.com/smart-kits/dropit-client/releases) |
+| **Chrome · Edge** | The extension | ✓ | — | The site → *Devices*, or [the repository](https://github.com/smart-kits/dropit-client) |
+| **Terminal** (macOS, Linux) | `dropit` | ✓ | ✓ | The site → *Devices*, or [the repository](https://github.com/smart-kits/dropit-client) |
+| **Any browser** | The web inbox | ✓ | ✓ (press *Pull new items*) | Nothing to install: the site itself |
+| **Obsidian on your phone** | This plugin, on the mobile app | ✓ | ✓ | Community plugins, like this one |
+
+**Joining each of them:** *Settings → dropit → Add a device* shows a 6-character code and a QR code, valid 5 minutes. Type it on the other device, or scan
+the QR code with its camera (on an iPhone it opens the shortcut's setup with the code filled in). The first device creates the account;
+every other one joins with a code like this.
+
+**A good setup:** send from your phone with the shortcut (iPhone) or the app (Android), from the browser with the extension; receive everything here as notes.
+To read what you sent from this computer on your phone, put the plugin on Obsidian mobile too, or open the web inbox.
+
 ## Where things land
 
-Pick once in *Settings → dropit → Write items to*:
+Pick once in *Settings → dropit → Receiving → Write items as*:
 
 | Choice | What you get |
 |---|---|
@@ -106,17 +127,91 @@ When items arrive, one notice says how many — click it to open the last one.
 - **A flaky network is ridden out.** A connection dropped on the way (a proxy, patchy Wi-Fi) is tried again
   before it counts; a failed sync retries on its own.
 - **A file that won't download doesn't block the rest.** A line takes its place:
-  `⚠️ report.pdf (820 KB) couldn't be downloaded: … Settings → dropit → Pull again tries once more.`
-- **Pull again** (*Settings → dropit*): everything, the last N items, or the last N days. What's already in
+  `⚠️ report.pdf (820 KB) couldn't be downloaded: … Settings → dropit → Advanced → Pull again tries once more.`
+- **Pull again** (*Settings → dropit → Advanced*): everything, the last N items, or the last N days. What's already in
   the vault is skipped, failed downloads are fetched again. With *A new note for each*, a note you deleted
   comes back; in the other two modes, what you deleted stays deleted.
 - A newly joined device starts with what's sent after it joined; *Pull again* fetches what came before,
   for as long as your plan keeps items.
 
+## Process what arrives with an AI agent or a command
+
+*Settings → dropit → Handle automatically after it arrives → AI processing* hands what arrives to a command line AI agent already
+installed on your computer, or to a command of your own. A received text or link becomes **one note: what was sent,
+quoted, then the result**.
+
+```text
+Inbox/10-16 14.02 Thursday meeting.md          ← the same note, once it was processed
+    > Thursday 9:00 meeting with the supplier, bring the budget sheet. Send the quote to Li before Friday.
+
+    ---
+
+    This is a to-do: one meeting and one follow-up.
+    - Meeting Thursday 9:00, bring the budget sheet
+    - Send the quote to Li before Friday
+```
+
+- **It is off until you turn it on, and the first time you are shown what it will do:** the program and its full
+  list of arguments, its permission, and that **everything that arrives and matches the rule is handed to the agent
+  you chose**. dropit does not handle or keep it, and does not call a model or keep a key — the agent uses its own sign-in.
+- **Pick the agent; its command is written out, and yours to edit.** The list holds what is found on this computer out of Claude Code,
+  Codex CLI, Grok CLI, Gemini CLI and Pi, and *Custom command* for a program of your own. Whatever you pick, the *Command* line shows what
+  dropit will start (no shell involved; what arrived goes in on standard input, never into the command). Edit it to run the agent your
+  way; *Reset* brings the default back. For Claude Code the default also gives each item only what it needs (below); an edited command
+  runs exactly as written. For an agent dropit has not checked, the default is what its own help suggests.
+- **Four boxes in one row.** *Text* (tidy and summarise), *Links* (read the page), *Images & PDFs* (copy the text out), *Audio & video*
+  (transcribe). The boxes write the **prompt** (folded under them); edit it freely. Ticking again rewrites it only if you have not
+  changed it. Each item is one call, and the agent decides what to do with it.
+- **A received text or link turns into its answer.** Its front matter stays, and so does the page it came from. Nothing is lost:
+  what arrived is the quote, and if the agent fails the note stays exactly as it arrived. *Keep the original note* leaves the received note
+  as it was and writes the result as a note beside it, `<original name> · <rule name>`. A received **file** is always kept, with
+  the result in a note beside it. A note that holds several items (an appended note, today's daily note, a batch) is never
+  replaced; its items get a note each, with the item's number in the name.
+- **By hand:** *dropit: Process this note with…* runs the rule on the open note (it works while the rule is off); the result is
+  always a note beside it and the note is never changed. *dropit: Re-run the last handler* runs it again.
+- **Try it, and see what runs:** The small *Try it* button beside the AI switch really runs it on the latest item, after asking. The *Show…* button on the command row shows, for an
+  example item and without running anything, the exact command, what the agent would be sent, and its environment.
+- **A failure is said on screen**, at most once a minute, so a missing agent does not fill the screen. The note it was about stays
+  as it arrived. dropit keeps no record of runs.
+- **Limits** (folded by default) are your own numbers: a minimum length for text, a time limit, the longest text, the largest file, how many of a backlog get processed (the newest 3 by default; 0 = all; the rest are still written to your vault), and, for Claude, a model name (passed as `--model`; empty uses Claude's own default).
+  There is none built in.
+
+### What the agent gets to use
+
+dropit decides this per item, from what arrived:
+
+| Arrived | Claude Code gets |
+|---|---|
+| A text | No tools: it reads what it is given and answers in text |
+| A link | One website: the one the link points to. A link that redirects elsewhere is not checked |
+| An image, a video, a file | A copy of that one file in an empty temporary folder, to read, and nothing else |
+
+Only **Claude Code** has been checked (version 2.1.301), so it is the only one that gets this per-item permission. It cannot
+read audio or video; its answer says so when it is handed one. For those, use a command that can. **Codex CLI, Grok CLI, Gemini CLI
+and Pi** are found if installed and can be picked, but dropit has not checked what their settings can be held to, so what they
+may do is up to you.
+
+### Safety
+
+- **What arrives is untrusted input.** Anyone holding a send-only key for your account can put text in front of the
+  agent. So the content only ever goes to the agent's **standard input**, inside a block marked as data, never onto a
+  command line and never into your instructions; and for a text, Claude Code **has no tools**.
+- **The agent starts in an empty temporary folder** with only `PATH`, `HOME` and `USER` in its environment, a time
+  limit, and no retry. The folder is removed afterwards.
+- **Its answer is cleaned before it is written**: remote images and embeds, HTML, the language of code blocks (a
+  block tagged for a query or script plugin would run), and template and query syntax are all neutralised. The quoted original
+  is written as it was received (with Templater's `<%` defused while it runs new notes, as for any received note).
+- **A failure never stops an item arriving.** The item is written first; processing comes after.
+- In your prompt, `{{kind}}` is the only variable that means anything: others are dropped, because titles, file names
+  and text are written by whoever sent them.
+
+**Desktop only.** On a phone this part of the settings says so and nothing is ever started; receiving works as usual.
+
 ## Run your own command after each item
 
-*Settings → dropit → Run a command after receiving* picks any Obsidian command — a QuickAdd macro, a
+*Settings → dropit → Handle automatically after it arrives → Run an Obsidian command* picks any Obsidian command — a QuickAdd macro, a
 Templater script, another plugin's action. It runs once for each item, **after** the item is in the vault.
+(To hand items to an AI agent you don't need this: see *Process what arrives with an AI agent* above. The two work together: this runs first, and if it changes the note, the AI's result is written beside it instead of replacing it.)
 
 - **Delivery never depends on it.** The item is written first; the command runs afterwards, once, with no retry.
 - **One item at a time**, a second apart.
@@ -157,33 +252,6 @@ module.exports = async ({ app }) => {
 };
 ```
 
-### A complete example: an AI summary under every text that arrives
-
-[`recipes/ai-summary.quickadd.js`](recipes/ai-summary.quickadd.js) is a ready-made QuickAdd user script.
-A text you send becomes a note as usual; a few seconds later a summary appears under it:
-
-```md
-Thursday 3pm: meeting with the supplier. Bring last quarter's quotes and the new delivery schedule…
-
-> [!summary] AI · #42
-> - Supplier meeting Thursday 3pm; bring the quotes and the delivery schedule.
-> - Send the minutes to legal afterwards.
-```
-
-It hands the text to a command-line agent you already have (Claude Code, Codex CLI, …) on **stdin**, with
-**no tools**: the agent can read the text and answer, nothing else. To set it up:
-
-1. Copy the file into your vault, for example `Scripts/ai-summary.quickadd.js`. At its top, set `AGENT` to
-   the full path of your agent (`which claude` in a terminal) — Obsidian started from the Dock doesn't see
-   your shell's `PATH`.
-2. QuickAdd → add a **Macro** choice → configure it → **User Scripts** → pick the file. Turn on the ⚡ next
-   to the macro so it becomes a command.
-3. *Settings → dropit → Run a command after receiving* → pick that command.
-
-Desktop only. The plugin itself does none of this — it only hands the item over; the agent, the prompt and
-what happens to the answer are yours to change. Checked end to end on Obsidian 1.12.7 with QuickAdd 2.12.3
-and Claude Code.
-
 > **Treat the content as untrusted input.** Anyone holding a send-only token for your account — an
 > old phone, a leaked shortcut — can put anything into it. Don't `eval` it, and never build a shell
 > command line out of it: pass it to a program on **stdin** or in a file. The object is frozen, so a
@@ -193,11 +261,14 @@ and Claude Code.
 
 - **A dropit account is required.** Creating one is free, in the plugin (*First time using dropit? → Create a new account*)
   or at [dropit.smart-kits.xyz](https://dropit.smart-kits.xyz). It asks for no name, email or phone number.
+  When many accounts were created from your network today, the plugin may show *preparing the account…* for a few
+  seconds (it does a small calculation on your computer, nothing is sent for it) and then carries on by itself.
+  If that doesn't work, it asks you to create the account in the browser instead.
 - **Free to use; an optional paid plan raises the limits.** Everything described here works on the free plan, within its limits:
-  30 items a day, files up to 5 MB, items kept for 1 day, 3 devices, and real-time delivery for the first 10 days
+  30 items a day, files up to 10 MB, items kept for 1 day, 3 devices, and real-time delivery for the first 10 days
   after signing up. After that, new items come in when Obsidian opens, when you come back to its window, or when you
   click *Sync now*.
-- **Payment.** The paid plan costs $1.90 a month, $9.90 a year, or $29.90 once for lifetime (limited), plus local tax:
+- **Payment.** The paid plan costs $19.90 a year (the first month is $1.90), $29.90 for one year paid once, or $49.90 once for lifetime (limited), plus local tax:
   300 items a day, files up to 100 MB, 10 devices, items kept 10 days, real-time delivery always on.
   You pay on the website ([pricing](https://dropit.smart-kits.xyz/#pricing)), never inside the plugin, and the plugin works the same
   either way. Checkout asks for an email, where the receipt goes. Cancel anytime; any payment can be refunded within 7 days
@@ -241,13 +312,13 @@ Ask me which vault and before creating an account, and never show or commit my t
 | Setting | What it does |
 |---|---|
 | *(top line)* | The connection state and your account: plan · devices · space · how long items are kept. *Sync now* next to it |
-| Write items to · Folder · Note | Where items land (above) |
-| Run a command after receiving | Your command, or none |
-| Pull again | Everything · the last N items · the last N days |
-| Add a device | A pairing code and its QR code |
-| Devices | Every device on your account; *Remove* stops one right away |
-| Feedback | *Report a problem* (a new public issue with your versions filled in) · *Source code* |
-| Advanced → Server address | Only if you were given another address; the built-in one is always tried last |
+| **Receiving** | *Write items as* · *Folder* · *Note*: where items land (above) |
+| **Handle automatically after it arrives** | Two separate rows, either or both: *AI processing* (desktop only; with *Try it* beside the switch, and below it the agent, what to handle (with *Keep the original note* at the end of that row), the prompt, the prompt, then the limits and the command, both folded) · *Run an Obsidian command* |
+| **Devices** | *Add a device* (a pairing code and its QR code) · every device on your account (*Remove* stops one right away) · a link to the install page |
+| **Advanced** | *Pull again* · *Server address* (only if you were given another one; the built-in is always tried last) · *Unpair* |
+| *(bottom)* | *Report a problem* (a new public issue with your versions filled in) · *Source code* |
+
+Each group folds and says how it is set while folded. Explanations live behind the small (i) next to a name: hover it, or click it where there is no hover.
 | Advanced → Unpair | Removes this vault from your account (freeing its device slot) and forgets its sign-in; your settings stay |
 
 The interface follows Obsidian's language: English, or Simplified Chinese when Obsidian is set to Chinese.
@@ -261,9 +332,9 @@ The interface follows Obsidian's language: English, or Simplified Chinese when O
 | *Device limit reached* | Your plan's device count is used up | Remove a device you no longer use (*Settings → dropit → Devices*) |
 | *Pairing code expired* | Codes last 5 minutes and work once | Generate a new one |
 | *Real-time trial ended* | New accounts get real-time for a while; after that it syncs when you open or come back to Obsidian | Nothing to fix — click the status bar to sync any time |
-| `⚠️ … couldn't be downloaded` in a note | The file didn't come down this time | *Settings → dropit → Pull again* |
+| `⚠️ … couldn't be downloaded` in a note | The file didn't come down this time | *Settings → dropit → Advanced → Pull again* |
 
-Anything else: *Settings → dropit → Feedback → Report a problem* (a public issue). For questions about your account you'd rather not post publicly, email [support@dropit.smart-kits.xyz](mailto:support@dropit.smart-kits.xyz).
+Anything else: the *Report a problem* link at the bottom of *Settings → dropit* (a public issue). For questions about your account you'd rather not post publicly, email [support@dropit.smart-kits.xyz](mailto:support@dropit.smart-kits.xyz).
 
 ## Privacy
 
@@ -275,6 +346,9 @@ Anything else: *Settings → dropit → Feedback → Report a problem* (a public
 - Text from other devices and web pages is never run as code. If Templater is set to run new notes as templates
   (*Trigger Templater on new file creation*), `<%` in what arrives is written with an invisible zero-width space after
   the `<`, so Templater doesn't see a command in it. It looks the same; the payload your command gets keeps the original.
+- Auto-processing is off until you turn it on. Once it is on, what arrives and matches a rule goes to the agent you
+  chose, on your computer; dropit keeps nothing of it and keeps no record of runs. Its rule lives in this
+  plugin's `data.json`, next to the sign-in, and is not shared with the command line tool.
 - Each device has its own key and can be removed on its own; removing one frees its slot at once.
 - Pairing this vault again (for example after reinstalling the plugin) takes the earlier pairing's place instead of
   using another slot. To recognize it, the plugin sends the key it had, if any, and a SHA-256 hash of a random ID.

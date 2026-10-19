@@ -25,18 +25,241 @@
   width: 6em;
 }
 
-.dropit-advanced {
-  margin-top: var(--size-4-6);
-}
-
-.dropit-advanced > summary {
-  cursor: pointer;
-  color: var(--text-muted);
-  padding: var(--size-4-2) 0;
-}
-
 .dropit-notice-link {
   margin-top: var(--size-4-1);
   text-decoration: underline;
   cursor: pointer;
+}
+
+/* Auto-processing: the preview, the rule editor and the first-time confirmation */
+
+.dropit-agent-preview {
+  margin: var(--size-4-2) 0 var(--size-4-3);
+}
+
+.dropit-agent-title {
+  margin-top: var(--size-4-3);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+}
+
+.dropit-agent-pre {
+  margin: var(--size-4-1) 0 0;
+  padding: var(--size-4-2) var(--size-4-3);
+  background: var(--background-primary-alt);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  font-family: var(--font-monospace);
+  font-size: var(--font-smallest);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* Settings: groups that fold, small (i) tips, a command box that is as wide as the page */
+
+.dropit-status.setting-item {
+  border-top: 0;
+}
+
+.dropit-group {
+  margin-top: var(--size-4-3);
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.dropit-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--size-4-3);
+  padding: var(--size-4-3) 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.dropit-group-head::-webkit-details-marker {
+  display: none;
+}
+
+.dropit-group-head::before {
+  content: "›";
+  display: inline-block;
+  width: 0.8em;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+}
+
+.dropit-group[open] > .dropit-group-head::before {
+  transform: rotate(90deg);
+}
+
+.dropit-group-title {
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold);
+}
+
+/* Folded, a group says how it is set; open, the rows say it */
+.dropit-group-sum {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropit-group[open] > .dropit-group-head .dropit-group-sum {
+  display: none;
+}
+
+.dropit-tip {
+  display: inline-flex;
+  margin-left: var(--size-4-2);
+  vertical-align: -2px;
+  color: var(--text-faint);
+  cursor: help;
+}
+
+.dropit-tip:hover {
+  color: var(--text-muted);
+}
+
+.dropit-tip svg {
+  width: 14px;
+  height: 14px;
+}
+
+.dropit-checks {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: var(--size-4-2) var(--size-4-5);
+}
+
+.dropit-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  cursor: pointer;
+}
+
+/* The command takes the whole width under its name: it is a line to read, not a field to squeeze */
+.dropit-wide.setting-item {
+  flex-wrap: wrap;
+}
+
+.dropit-wide .setting-item-info {
+  flex: 1 1 100%;
+}
+
+.dropit-wide .setting-item-control {
+  flex: 1 1 100%;
+  justify-content: flex-start;
+  margin-top: var(--size-4-1);
+}
+
+.dropit-command {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  font-family: var(--font-monospace);
+  font-size: var(--font-smallest);
+}
+
+.dropit-hint {
+  padding: var(--size-4-2) 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.dropit-hint a {
+  margin-left: var(--size-4-1);
+}
+
+.dropit-prompt-row {
+  padding: var(--size-4-2) 0;
+}
+
+.dropit-prompt-row > summary {
+  cursor: pointer;
+  padding: var(--size-4-1) 0;
+}
+
+.dropit-prompt {
+  width: 100%;
+  margin-top: var(--size-4-2);
+  font-family: var(--font-monospace);
+  font-size: var(--font-smallest);
+}
+
+.dropit-foot {
+  display: flex;
+  justify-content: center;
+  gap: var(--size-4-5);
+  margin-top: var(--size-4-8);
+  font-size: var(--font-ui-small);
+}
+
+.dropit-foot a {
+  color: var(--text-muted);
+}
+
+/* The AI's own settings hang under its switch; the Obsidian command is a separate row of the same rank */
+.dropit-sub {
+  margin-left: var(--size-4-2);
+  padding-left: var(--size-4-3);
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+.dropit-top.setting-item {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.dropit-try {
+  margin-right: var(--size-4-2);
+}
+
+/* Five numbers in a tidy grid: as many columns as fit (three, then two), each cell label left, field and unit right */
+.dropit-limits {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13em, 1fr));
+  gap: var(--size-4-2) var(--size-4-5);
+  width: 100%;
+}
+
+.dropit-limit {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-1);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.dropit-limit > span:first-child {
+  flex: 1;
+}
+
+.dropit-unit {
+  min-width: 2em;
+}
+
+.dropit-limit .dropit-number {
+  width: 5em;
+}
+
+.dropit-model {
+  width: 11em;
+}
+
+/* "Keep the original note" ends the row of what to handle, set apart from the kinds */
+.dropit-check-keep {
+  margin-left: var(--size-4-3);
+  padding-left: var(--size-4-3);
+  border-left: 1px solid var(--background-modifier-border);
+}
+
+.dropit-reset {
+  margin-left: var(--size-4-3);
+  font-size: var(--font-ui-smaller);
 }

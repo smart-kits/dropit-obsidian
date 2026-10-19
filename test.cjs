@@ -9,6 +9,7 @@ const Module = require('node:module');
 const orig = Module._load;
 let language;                                  // what the stubbed getLanguage() reports
 const notices = [];                            // every Notice the plugin shows
+let lastNotice = null;                         // the last one, whole: its fragment (text, links) and how long it stays
 const timers = [];                             // every timeout the plugin schedules
 console.error = () => {};                      // the plugin logs expected failures; keep the output readable
 let net = async () => { throw new Error('no network in this test'); };
@@ -18,7 +19,7 @@ const el = () => ({
   setText() {}, addClass() {}, setAttribute() {}, addEventListener() {}, createDiv: () => el(), createEl: () => el(),
   appendText() {}, empty() {}, toggle() {},
 });
-globalThis.createFragment = (fn) => { const f = el(); f.text = []; f.createDiv = ({ text }) => { f.text.push(text); return el(); }; fn?.(f); return f; };
+globalThis.createFragment = (fn) => { const f = el(); f.text = []; f.links = []; f.createDiv = ({ text }) => { f.text.push(text); return el(); }; f.createEl = (tag, o) => { f.links.push(o); return el(); }; fn?.(f); return f; };
 globalThis.window = {
   setTimeout: (fn, ms) => { timers.push(ms); setImmediate(fn); return 0; },
   clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
@@ -31,21 +32,37 @@ const anything = () => new Proxy(function () {}, {
   set: (target, key, v) => { target[key] = v; return true; },
 });
 let thenCalls = 0;
+const ui = { names: [], buttons: [], toggles: [], dropdowns: [], opened: [] };    // what the settings page and its modals drew, and what can be clicked
+/** A button or toggle that remembers its handler, so a test can press it */
+const control = (rec) => {
+  const c = anything();
+  c.setButtonText = (text) => { rec.text = text; return c; };
+  c.onClick = (fn) => { rec.click = fn; return c; };
+  c.setValue = (v) => { rec.value = v; return c; };
+  c.onChange = (fn) => { rec.change = fn; return c; };
+  c.addOptions = (o) => { rec.options = o; return c; };
+  return c;
+};
 /** Like Obsidian's: chainable, with a then(cb) that calls back with itself — which makes every Setting a thenable */
 class Setting {
   constructor() { this.settingEl = anything(); }
-  setName(n) { this.name = n; return this; }
+  setName(n) { this.name = n; ui.names.push(n); return this; }
   setDesc(d) { this.desc = d; return this; }
   setHeading() { return this; }
-  addButton(cb) { cb(anything()); return this; }
+  addButton(cb) { const rec = { name: this.name }; ui.buttons.push(rec); cb(control(rec)); return this; }
   addExtraButton(cb) { cb(anything()); return this; }
-  addDropdown(cb) { cb(anything()); return this; }
+  addDropdown(cb) { const rec = { name: this.name }; ui.dropdowns.push(rec); cb(control(rec)); return this; }
   addText(cb) { cb(anything()); return this; }
+  addTextArea(cb) { cb(anything()); return this; }
+  addToggle(cb) { const rec = { name: this.name }; ui.toggles.push(rec); cb(control(rec)); return this; }
   then(cb) { if (++thenCalls < 1000) cb(this); return this; }   // past 1000, stop the loop so the test can say so
 }
+/** Which Node modules main.js asked for: none may be asked for just by loading it, and none at all on a phone */
+const nodeLoads = [];
+const platform = { isDesktopApp: true };
 const fakeMoment = () => ({ format: (f) => ({ 'YYYY-MM-DD': '2026-09-29', 'HH:mm': '10:30', 'dddd': 'Tuesday' }[f] ?? f) });
 
-Module._load = (req, ...rest) => (req === 'obsidian'
+Module._load = (req, ...rest) => (req !== 'obsidian' && /obsidian-plugin\/main\.js$/.test(rest[0]?.filename ?? '') && nodeLoads.push(req), req === 'obsidian'
   ? {
       Plugin: class {
         constructor(app) { this.app = app; this.commands = []; this.manifest = { id: 'dropit' }; }
@@ -56,8 +73,10 @@ Module._load = (req, ...rest) => (req === 'obsidian'
         async saveData(d) { this.stored = JSON.parse(JSON.stringify(d)); }
       },
       PluginSettingTab: class { constructor(a, p) { this.plugin = p; } },
-      Modal: class {}, FuzzySuggestModal: class {}, Setting,
-      Notice: class { constructor(m) { notices.push(typeof m === 'string' ? m : m.text.join(' ')); } },
+      Modal: class { constructor(app) { this.app = app; this.contentEl = anything(); } open() { ui.opened.push(this); this.onOpen?.(); } close() { this.onClose?.(); } },
+      FuzzySuggestModal: class { constructor(app) { this.app = app; } setPlaceholder() {} open() { ui.opened.push(this); } },
+      Platform: platform, Setting,
+      Notice: class { constructor(m, ms) { notices.push(typeof m === 'string' ? m : m.text.join(' ')); lastNotice = { m, ms }; } },
       normalizePath: (p) => p.replace(/\/+/g, '/').replace(/^\/|\/$/g, '') || '/',
       requestUrl: (req) => net(req),
       addIcon: () => {},
@@ -96,7 +115,7 @@ function makeVault() {
   };
   const vault = {
     configDir: '.obsidian',
-    adapter: { read: async () => { throw new Error('none'); } },
+    adapter: { read: async () => { throw new Error('none'); }, readBinary: async (p) => { const f = files.get(p); return Uint8Array.from(f).buffer; }, stat: async (p) => (files.has(p) ? { size: files.get(p).length } : null) },
     getFileByPath: (p) => (files.has(p) ? file(p) : null),
     getAbstractFileByPath: (p) => (files.has(p) ? file(p) : null),
     getFolderByPath: () => null,
@@ -137,6 +156,9 @@ async function makePlugin(settings = {}, stored, local = {}) {
   };
   const p = new DropitPlugin(app);
   p.stored = stored ?? { token: 'dk_x', ...settings };
+  // Looking for agents asks the person's own shell: tests never do, and never find a real agent
+  p.detect = async () => [{ id: 'claude', label: 'Claude Code', path: null, verified: 'Claude Code 2.1.301', modes: ['think', 'files', 'web'] },
+    { id: 'codex', label: 'Codex CLI', path: null, verified: null, modes: [] }];
   await p.onload();
   return { p, ...v, events, ran };
 }
@@ -524,6 +546,17 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     for (let i = 0; i < 5; i++) await settle();
     window.setTimeout = (fn, ms) => { timers.push(ms); setImmediate(fn); return 0; };
     ok('…which heals it once the network is back', q.state !== 'error' && q.syncFails === 0, `${q.state} · ${q.syncFails}`);
+
+    // A request that never answers (a stalled connection) ends by itself instead of holding the sync, and the line "reading…", for good
+    const z = (await makePlugin()).p;
+    z.settings.endpoints = [];
+    z.apiDeadlineMs = 50;
+    let hung = 0;
+    serve({ 'GET /v1/me': () => { hung++; return new Promise(() => {}); } });
+    let stalled = null;
+    await Promise.race([z.api('GET', '/v1/me').catch((e) => { stalled = e; }), new Promise((r) => setTimeout(r, 2000))]);
+    ok('a request nobody answers ends with a message saying so, and is not sent again at once', stalled && /no answer in \d+ seconds/.test(stalled.message) && hung === 1, `${stalled?.message} · ${hung}`);
+    ok('…in both languages', /30 秒内没有响应/.test(DropitPlugin.STRINGS.zh.timedOut(30)));
   }
 
   console.log('── Removed from the account: no endless retries ──');
@@ -1360,6 +1393,797 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       await p.connect();
       ok('the server says come back in an hour: the next try waits at least that long', timers.length === 1 && timers[0] >= 3_600_000, JSON.stringify(timers));
     } finally { window.setTimeout = setTimeout; delete globalThis.WebSocket; }
+  }
+
+  // ── Proof of work when creating an account ──
+  {
+    const { solvePow, powChallengeOk, dkhOf } = DropitPlugin;
+    const nodeCrypto = require('node:crypto');
+    const vectors = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'clients', 'test', 'vectors', 'pow.json'), 'utf8'));
+    const sha = (s) => nodeCrypto.createHash('sha256').update(s, 'utf8').digest();
+    const zeroBits = (d) => { let n = 0; for (const b of d) { if (b === 0) { n += 8; continue; } n += Math.clz32(b) - 24; break; } return n; };
+
+    for (const c of vectors.hash.cases) {
+      ok(`pow vector "${c.name}": the device key hashes to the reference`, await dkhOf(c.device_key ?? undefined) === c.dkh);
+      ok(`pow vector "${c.name}": digest and leading zero bits`, zeroBits(sha(`${c.id}|${c.salt}|${c.dkh}|${c.nonce}`)) === c.leading_zero_bits
+        && sha(`${c.id}|${c.salt}|${c.dkh}|${c.nonce}`).toString('hex') === c.digest_hex);
+      if (c.valid) ok(`pow vector "${c.name}": the solver finds the reference nonce`, await solvePow({ id: c.id, salt: c.salt, bits: c.bits }, c.dkh) === c.nonce);
+    }
+    for (const c of vectors.leadingZeroBits) ok(`leading zero bits of ${c.digest_hex.slice(0, 6)}… is ${c.expect}`, zeroBits(Buffer.from(c.digest_hex, 'hex')) === c.expect);
+    // Every answer must make the reference check pass, with prefixes of different lengths (one, two or three blocks)
+    for (const dk of [undefined, 'extension-0123456789abcdef0123456789abcdef']) {
+      const dkh = await dkhOf(dk);
+      const ch = { id: 'q1w2e3r4t5y6u7i8o9p0aQ', salt: 'zXcVbNmLkJhGfDsAqWeRtY', bits: 14 };
+      const n = await solvePow(ch, dkh);
+      ok(`pow: an answer for ${dk ? 'a key' : 'no key'} passes the reference check`, /^(0|[1-9][0-9]*)$/.test(n) && zeroBits(sha(`${ch.id}|${ch.salt}|${dkh}|${n}`)) >= ch.bits, n);
+    }
+    // It hands the event loop back, and gives up after the time limit
+    let pauses = 0, clock = 0;
+    const none = await solvePow({ id: 'a', salt: 'b', bits: 26 }, '-', { limitMs: 50, now: () => (clock += 5), pause: async () => { pauses++; } });
+    ok('pow: no answer within the limit gives null, after yielding between slices', none === null && pauses > 0, JSON.stringify([none, pauses]));
+
+    const good = { v: 1, id: 'AAAAAAAAAAAAAAAAAAAAAA', iat: 1760000000000, exp: 1760000300000, purpose: 'accounts.create', bits: 8, salt: 'BBBBBBBBBBBBBBBBBBBBBB', used: 3, sig: 'sig' };
+    ok('challenge: a valid one is accepted', powChallengeOk(good) && powChallengeOk({ ...good, bits: 26 }));
+    ok('challenge: bits above 26, another version or purpose, or nothing is refused',
+      !powChallengeOk({ ...good, bits: 27 }) && !powChallengeOk({ ...good, v: 2 }) && !powChallengeOk({ ...good, purpose: 'x' }) && !powChallengeOk(null) && !powChallengeOk('x'));
+
+    const vault = (id) => { const m = new Map(); return { appId: id, loadLocalStorage: (k) => (m.has(k) ? JSON.parse(m.get(k)) : null), saveLocalStorage: (k, v) => m.set(k, JSON.stringify(v)) }; };
+    const refuse = (extra) => ({ status: 403, json: { error: 'TURNSTILE_REQUIRED', retry: true, ...extra } });
+    const verified = (body) => body.pow && body.pow.id === good.id && /^[0-9]+$/.test(body.pow.nonce)
+      && zeroBits(sha(`${body.pow.id}|${body.pow.salt}|${body.device_key ? sha(body.device_key).toString('hex') : '-'}|${body.pow.nonce}`)) >= body.pow.bits;
+
+    // A challenge: solved, and the same request sent once more with `pow`
+    notices.length = 0;
+    let c1 = await makePlugin({ token: '' }, {}, vault('powA'));
+    let calls = serve({ 'POST /v1/accounts': (body) => (body.pow ? { json: { token: 'dk_pow', device_id: 'd_pow' } } : refuse({ challenge: good })), 'GET /v1/pull': pages([]) });
+    await c1.p.createAccount();
+    const posts = calls.filter((c) => c.path === '/v1/accounts').map((c) => JSON.parse(c.body));
+    ok('challenge: the request is sent twice — the second one carries pow, the first did not', posts.length === 2 && !posts[0].pow && !!posts[1].pow, JSON.stringify(posts));
+    ok('…everything else in the request is the same', posts[1].device_name === posts[0].device_name && posts[1].device_key === posts[0].device_key && /^[0-9a-f]{64}$/.test(posts[0].device_key ?? ''));
+    ok('…pow is the challenge sent back unchanged, plus the nonce', Object.entries(good).every(([k, v]) => posts[1].pow[k] === v) && Object.keys(posts[1].pow).length === Object.keys(good).length + 1);
+    ok('…and its nonce is a real answer for the device key sent', verified(posts[1]));
+    ok('…the account was created and the user was told it is being prepared', c1.p.settings.token === 'dk_pow' && notices.some((n) => /preparing/.test(n)), JSON.stringify([c1.p.settings.token, notices]));
+
+    // No device key at all: the answer is tied to "-"
+    calls = serve({ 'POST /v1/accounts': (body) => (body.pow ? { json: { token: 'dk_pow2', device_id: 'd_pow2' } } : refuse({ challenge: good })), 'GET /v1/pull': pages([]) });
+    c1 = await makePlugin({ token: '' }, {}, {});
+    await c1.p.createAccount();
+    const p2 = calls.filter((c) => c.path === '/v1/accounts').map((c) => JSON.parse(c.body));
+    ok('no device key: the second request has no device_key and its answer is tied to "-"', p2.length === 2 && p2[1].device_key === undefined && verified(p2[1]), JSON.stringify(p2));
+
+    // Too hard: not solved, not sent again, the usual message
+    for (const [why, ch] of [['bits above the limit', { ...good, bits: 27 }], ['another version', { ...good, v: 2 }], ['another purpose', { ...good, purpose: 'x' }], ['no challenge', undefined]]) {
+      calls = serve({ 'POST /v1/accounts': () => refuse(ch ? { challenge: ch } : {}) });
+      c1 = await makePlugin({ token: '' }, {}, vault('powB'));
+      let err;
+      try { await c1.p.createAccount(); } catch (e) { err = e; }
+      ok(`${why}: nothing is solved, one request, the browser message`, calls.filter((c) => c.path === '/v1/accounts').length === 1 && err?.code === 'TURNSTILE_REQUIRED' && /browser/.test(err.message), JSON.stringify([err?.message, calls.length]));
+    }
+
+    // Still refused after answering: a new challenge comes back, and it is not answered again
+    calls = serve({ 'POST /v1/accounts': () => refuse({ challenge: good }) });
+    c1 = await makePlugin({ token: '' }, {}, vault('powC'));
+    let err2;
+    try { await c1.p.createAccount(); } catch (e) { err2 = e; }
+    ok('refused again after answering: exactly two requests, then the error', calls.filter((c) => c.path === '/v1/accounts').length === 2 && err2?.code === 'TURNSTILE_REQUIRED', String(calls.length));
+
+    // A different refusal is untouched
+    calls = serve({ 'POST /v1/accounts': () => ({ status: 429, json: { error: 'SIGNUP_LIMITED', challenge: good } }) });
+    c1 = await makePlugin({ token: '' }, {}, vault('powD'));
+    let err3;
+    try { await c1.p.createAccount(); } catch (e) { err3 = e; }
+    ok('another error code with a challenge is not answered', err3?.code === 'SIGNUP_LIMITED' && calls.every((c) => !c.body || !JSON.parse(c.body).pow), JSON.stringify([calls.length, err3?.code]));
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Auto-processing: an item goes to the person's own agent, the answer to a note beside it
+  // ════════════════════════════════════════════════════════════════════════
+  const nodePath = require('node:path');
+  const nodeFs = require('node:fs');
+  const FAKE = nodePath.join(__dirname, 'test-vectors', 'fake-agent.mjs');
+  const VECTORS = JSON.parse(nodeFs.readFileSync(nodePath.join(__dirname, 'test-vectors', 'handlers.json'), 'utf8'));
+  DropitPlugin = loadPlugin('en');
+  const X = new Proxy({}, { get: (_, k) => DropitPlugin[k] });   // always the copy of main.js the plugins below were made from
+  const sorted = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v);
+  const same = (a, b) => JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
+  /** A rule for the stand-in agent (a custom command: node running test-vectors/fake-agent.mjs). Never a real agent.
+   *  The source is kept by default here, so an answer is a separate note; the tests of the one-note way say so. */
+  const fakeRule = (extra = {}) => ({ id: 'r1', name: 'Fake', enabled: true, auto: true, agent: 'custom', argv: [process.execPath, FAKE],
+    kinds: ['text', 'url', 'image'], mode: 'think', prompt: 'Do the thing.', keepSource: true, ...extra });
+  const agentsOf = (rules, extra = {}) => ({ agents: { v: 1, consented: true, paused: false, handlers: rules, ...extra } });
+  const LONG = 'The supplier meeting is on Thursday at three, bring last quarter quotes and send the minutes to legal before Friday.';
+  const resultsIn = (files) => [...files.keys()].filter((k) => k.includes(' · '));
+  const notesIn = (files) => [...files.keys()].filter((k) => k.endsWith('.md') && !k.includes(' · '));
+  const answerOf = (content) => content.split('\n\n---\n\n')[1];
+  const allSpawned = () => nodeLoads.filter((m) => /child_process/.test(m)).length;
+  /** What detection finds on the machine in these tests: claude with its checked modes, codex and pi unchecked, two absent */
+  const FOUND = [
+    { id: 'claude', label: 'Claude Code', path: '/fake/bin/claude', verified: 'Claude Code 2.1.301', modes: ['think', 'files', 'web'] },
+    { id: 'codex', label: 'Codex CLI', path: '/fake/bin/codex', verified: null, modes: [] },
+    { id: 'grok', label: 'Grok CLI', path: null, verified: null, modes: [] },
+    { id: 'gemini', label: 'Gemini CLI', path: null, verified: null, modes: [] },
+    { id: 'pi', label: 'Pi', path: '/fake/bin/pi', verified: null, modes: [] },
+  ];
+  const ALL = ['ocr', 'audio', 'link', 'sum'];
+
+  console.log('── The settings page points to the other clients ──');
+  {
+    const { p } = await makePlugin();
+    ui.names.length = 0; ui.buttons.length = 0;
+    p.tab.containerEl = anything();
+    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 });
+    p.tab.display();
+    for (let i = 0; i < 10; i++) await settle();
+    const T = X.STRINGS.en;
+    ok('Devices keeps "Add a device" as its one action, and a quiet line (not a block) points to the install page', ui.names.includes(T.addDevice) && !ui.names.includes('Get dropit on your other devices') && /install/i.test(T.set.installLink) && /phone/i.test(T.set.install));
+    ok('…the link goes to the list of clients to install, not to the home page', X.INSTALL_URL === 'https://dropit.smart-kits.xyz/#install');
+    ok('…in both languages', T.set.installLink && X.STRINGS.zh.set.installLink && X.STRINGS.zh.set.install);
+  }
+
+  console.log('── Auto-processing: the embedded runner matches the shared vectors ──');
+  {
+    for (const c of VECTORS.plan) ok(`runner plan: ${c.name}`, same(X.planRun(c.handler, c.item), c.expect), JSON.stringify(X.planRun(c.handler, c.item)));
+    for (const c of VECTORS.compose) ok(`runner compose: ${c.name}`, X.composeInput(c.handler, c.item, c.fileNames) === c.expect);
+    for (const c of VECTORS.sanitize) ok(`runner sanitize: ${c.name}`, X.sanitizeAnswer(c.input) === c.expect, JSON.stringify(X.sanitizeAnswer(c.input)));
+    for (const c of VECTORS.env) ok(`runner env: ${c.name}`, same(X.agentEnv(c.bin, c.base), c.expect));
+    for (const c of VECTORS.fileNames) ok(`runner file name: ${JSON.stringify(c.input).slice(0, 30)}`, X.safeFileName(c.input) === c.expect);
+    for (const c of VECTORS.linkHost) ok(`runner link host: ${c.input}`, X.linkHost(c.input) === c.expect);
+    ok('claude is the only agent with checked settings', Object.keys(X.RUN_AGENTS.claude.modes).join() === 'think,files,web'
+      && ['codex', 'grok', 'gemini', 'pi'].every((id) => Object.keys(X.RUN_AGENTS[id].modes).length === 0 && X.RUN_AGENTS[id].verified === null));
+    ok('the agents looked for are the five, in this order', Object.keys(X.RUN_AGENTS).join() === 'claude,codex,grok,gemini,pi');
+    ok('the words of the rule and the document: the same as in the command line tool', X.composePrompt(['sum', 'ocr'], 'en').split('\n').length === 4
+      && same(X.kindsFor(['ocr']), ['image', 'file']) && X.modeFor({}, { kind: 'url' }) === 'web'
+      && X.resultDocument({ kind: 'text', text: 'a' }, '', 'b') === '> a\n\n---\n\nb\n'
+      && same(X.suggestArgv('pi', '/x/pi'), ['/x/pi', '-p', '--no-tools']));
+    const src = nodeFs.readFileSync(require.resolve('./main.js'), 'utf8');
+    const block = (text) => text.slice(text.indexOf('// agent-runner:begin v1'), text.indexOf('// agent-runner:end'));
+    ok('the block in main.js is exactly one pair of markers', src.split('// agent-runner:begin v1').length === 2 && src.split('// agent-runner:end').length === 2 && block(src).includes('async function runHandler'));
+  }
+
+  console.log('── Auto-processing: Node is only reached for on the desktop ──');
+  {
+    DropitPlugin = loadPlugin('en');
+    ok('loading main.js asks for no Node module at all', nodeLoads.length === 0 || nodeLoads.every((m) => m === 'obsidian'), nodeLoads.join());
+    nodeLoads.length = 0;
+    platform.isDesktopApp = false;
+    const { p, files, fm } = await makePlugin(agentsOf([fakeRule()]));
+    let detects = 0;
+    p.detect = async () => { detects++; return []; };
+    serve({ 'GET /v1/pull': pages([text(300, LONG)]) });
+    await p.sync(false);
+    await p.hookQueue;
+    ok('a phone: the item still arrives as a note', files.has('Inbox/09-17 08.00 The supplier meeting is on Thursday at three.md') || [...files.keys()].some((k) => k.startsWith('Inbox/09-17 08.00')), [...files.keys()].join());
+    ok('…no result note, no run, nothing started', resultsIn(files).length === 0 && p.runs.length === 0, JSON.stringify(p.runs));
+    ok('…and not one Node module was asked for', nodeLoads.length === 0, nodeLoads.join());
+    const res = await p.processWith(p.settings.agents.handlers[0], { seq: 1, kind: 'text', text: 'x', meta: {}, files: [], note: 'Inbox/a.md', batch: null }, { manual: true });
+    ok('even by hand, a phone starts nothing', res.ok === false && res.why === 'desktop-only' && nodeLoads.length === 0, JSON.stringify([res, nodeLoads]));
+    ok('the commands are not offered', p.commands.filter((c) => /process|rerun/.test(c.id)).every((c) => c.checkCallback(true) === false));
+    let thrown = null;
+    try { X.nodeDeps(); } catch (e) { thrown = e; }
+    ok('nodeDeps refuses outright', !!thrown && nodeLoads.length === 0);
+    // the settings page: a heading and one line, no controls, no look for agents
+    ui.names.length = 0; ui.buttons.length = 0; ui.toggles.length = 0;
+    p.tab.containerEl = anything();
+    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 });
+    p.tab.display();
+    for (let i = 0; i < 10; i++) await settle();
+    const A = X.STRINGS.en.agents;
+    ok('the settings page on a phone has no AI controls', !ui.names.includes(X.STRINGS.en.set.ai) && !ui.names.includes(X.STRINGS.en.set.agent) && !ui.names.includes(X.STRINGS.en.set.command), ui.names.join('|'));
+    ok('…and offers no switch and no look for agents', !ui.toggles.some((t2) => t2.name === X.STRINGS.en.set.ai) && detects === 0 && nodeLoads.length === 0 && /desktop/i.test(X.STRINGS.en.set.desktopOnly));
+    platform.isDesktopApp = true;
+  }
+
+  console.log('── Auto-processing: the first time it starts a program, on the desktop ──');
+  {
+    DropitPlugin = loadPlugin('en');
+    nodeLoads.length = 0;
+    const { p, files } = await makePlugin(agentsOf([fakeRule()]));
+    serve({ 'GET /v1/pull': pages([text(301, LONG)]) });
+    await p.sync(false);
+    await p.hookQueue;
+    ok('a desktop asks for fs, path and child_process — and not for os', ['fs', 'path', 'child_process'].every((m) => nodeLoads.includes(m)) && !nodeLoads.includes('os'), nodeLoads.join());
+    ok('…and there is an answer beside the note', resultsIn(files).length === 1, [...files.keys()].join());
+    ok('the commands are offered', p.commands.filter((c) => /process-note|rerun-last/.test(c.id)).length === 2);
+  }
+
+  console.log('── Auto-processing: the rule and its settings ──');
+  {
+    const none = X.normalizeAgents(undefined);
+    ok('default: version 1, not confirmed, not paused, no rule', same(none, { v: 1, consented: false, paused: false, recent: 3, handlers: [] }), JSON.stringify(none));
+    ok('junk is cleaned: unknown fields dropped, kinds limited to the five, numbers repaired, the permission per item by default', (() => {
+      const r = X.cleanRule({ id: 'a', name: ' N ', enabled: 1, auto: true, agent: 'claude', kinds: ['text', 'bogus', 'text', 'url'], mode: 'nonsense', prompt: 7, timeoutSec: -3, maxChars: 'x', evil: 'drop me', minChars: '' });
+      return same(r, { id: 'a', name: 'N', enabled: false, auto: true, agent: 'claude', kinds: ['text', 'url'], mode: 'auto', parts: [], keepSource: false, prompt: '7', timeoutSec: 120, maxChars: 20000, maxFileMB: 10 });
+    })(), JSON.stringify(X.cleanRule({ id: 'a', kinds: ['x'] })));
+    ok('minChars is only kept when set', X.cleanRule({ name: 'x', minChars: '12' }).minChars === 12 && !('minChars' in X.cleanRule({ name: 'x', minChars: '' })) && !('minChars' in X.cleanRule({ name: 'x', minChars: 0 })));
+    ok('a custom command keeps its argument list, and any permission the person named', (() => {
+      const r = X.cleanRule({ name: 'c', agent: 'custom', argv: ['/bin/x', '', 7, '-v'], mode: 'files', kinds: ['text'] });
+      return same(r.argv, ['/bin/x', '-v']) && r.mode === 'files';
+    })());
+    ok('only a web rule keeps a website', X.cleanRule({ name: 'w', mode: 'web', webDomain: ' Example.COM ' }).webDomain === 'example.com' && !('webDomain' in X.cleanRule({ name: 'w', mode: 'think', webDomain: 'example.com' })));
+    ok('the parts keep their order and only the four; keepSource only when true', same(X.cleanRule({ name: 'p', parts: ['sum', 'nope', 'ocr'], keepSource: true }).parts, ['ocr', 'sum']) && X.cleanRule({ name: 'p', keepSource: 'yes' }).keepSource === false && X.cleanRule({ name: 'p', keepSource: true }).keepSource === true);
+    ok('what was picked in the list is kept only when it is one we know', X.cleanRule({ name: 'p', pick: 'codex' }).pick === 'codex' && X.cleanRule({ name: 'p', pick: 'custom' }).pick === 'custom' && !('pick' in X.cleanRule({ name: 'p', pick: 'evil' })));
+    ok('one argument per line; blank lines are no argument', same(X.argvOf('/usr/bin/env\n\n  -i \r\nx'), ['/usr/bin/env', '-i', 'x']));
+    ok('a rule without a name, a kind, or (custom) a command is refused with a reason', !!X.ruleProblem(X.cleanRule({ name: '', kinds: ['text'] })) && !!X.ruleProblem(X.cleanRule({ name: 'a', kinds: [] }))
+      && !!X.ruleProblem(X.cleanRule({ name: 'a', agent: 'custom', kinds: ['text'] })) && X.ruleProblem(X.cleanRule({ name: 'a', agent: 'custom', argv: ['/x'], kinds: ['text'] })) === null);
+    ok('there is only ever one rule', X.normalizeAgents({ handlers: [{ name: 'a', kinds: ['text'] }, { name: 'b', kinds: ['text'] }] }).handlers.length === 1);
+    ok('a record of runs is not part of what is stored', !('log' in X.normalizeAgents({ log: [{ at: 1 }] })));
+
+    ok('recent: 3 by default, 0 and up to 1000 kept, anything else back to 3', [undefined, 0, 7, 1000, 1001, -1, 2.5, '5'].map((v) => X.normalizeAgents({ recent: v }).recent).join() === '3,0,7,1000,3,3,3,3');
+    ok('a model is kept only for claude and only when it is a plain model name', X.cleanRule({ name: 'm', agent: 'claude', model: ' sonnet ' }).model === 'sonnet'
+      && !('model' in X.cleanRule({ name: 'm', agent: 'claude', model: '--evil x' })) && !('model' in X.cleanRule({ name: 'm', agent: 'codex', model: 'sonnet' })) && !('model' in X.cleanRule({ name: 'm', agent: 'claude', model: '' })));
+    {
+      const { p: bp } = await makePlugin(agentsOf([fakeRule()], { consented: true }));
+      const seen = [];
+      bp.autoProcess = async (pl) => { seen.push(pl.n); };
+      const notes = [];
+      const list = Array.from({ length: 7 }, (_, n) => ({ n }));
+      await bp.runAuto(list);
+      ok('seven at once: the newest three go to the rule, in order', same(seen, [4, 5, 6]), JSON.stringify(seen));
+      seen.length = 0; bp.settings.agents.recent = 0;
+      await bp.runAuto(list);
+      ok('recent 0: all of them', seen.length === 7);
+      seen.length = 0; bp.settings.agents.recent = 3;
+      await bp.runAuto(list.slice(0, 3));
+      ok('three or fewer: all of them', same(seen, [0, 1, 2]));
+    }
+
+    const { p } = await makePlugin(agentsOf([fakeRule()]));
+    p.settings.agents.paused = true;
+    p.settings.agents.handlers[0].prompt = 'changed';
+    p.settings.agents.handlers[0].parts = ['ocr', 'link'];
+    p.settings.agents.handlers[0].keepSource = false;
+    await p.save();
+    ok('the rule, the confirmation and the pause are kept with the other settings', p.stored.agents.paused === true && p.stored.agents.consented === true
+      && p.stored.agents.handlers[0].prompt === 'changed' && p.stored.token === 'dk_x' && !('log' in p.stored.agents));
+    const again = await makePlugin({}, p.stored);
+    ok('…and come back after a restart', again.p.settings.agents.paused === true && again.p.settings.agents.handlers[0].name === 'Fake'
+      && same(again.p.settings.agents.handlers[0].parts, ['ocr', 'link']) && again.p.settings.agents.handlers[0].keepSource === false);
+    const old = await makePlugin({ folder: 'In' });
+    ok('settings from before this existed load with nothing set up', old.p.settings.agents.consented === false && old.p.settings.agents.handlers.length === 0 && old.p.settings.folder === 'In');
+  }
+
+  console.log('── Auto-processing: the one rule ──');
+  {
+    const r = X.newRule('claude', null, ALL, false, 'en');
+    ok('Claude Code: its own agent, no command of its own, the permission per item, off until turned on', r.agent === 'claude' && !('argv' in r) && r.pick === 'claude' && r.mode === 'auto' && r.enabled === false && r.auto === true && r.name === 'Auto' && r.keepSource === false);
+    ok('all four parts cover every kind', same(r.kinds, ['text', 'url', 'image', 'video', 'file']) && same(r.parts, ALL));
+    ok('the prompt is the frame and the four lines', r.prompt === X.composePrompt(['ocr', 'audio', 'link', 'sum'], 'en'), r.prompt);
+    ok('defaults: 120 s, 20000 characters, 10 MB, and no minimum length', r.timeoutSec === 120 && r.maxChars === 20000 && r.maxFileMB === 10 && !('minChars' in r));
+    ok('a rule survives being stored', same(X.cleanRule(r), r));
+    const cx = X.newRule('codex', ['/fake/bin/codex', 'exec'], ['sum']);
+    ok('an agent with no checked settings is a command of the person\'s own, and remembers what was picked', cx.agent === 'custom' && same(cx.argv, ['/fake/bin/codex', 'exec']) && cx.pick === 'codex' && same(cx.kinds, ['text']));
+    DropitPlugin = loadPlugin('zh');
+    const zh = X.newRule('claude', null, ALL, false, 'zh');
+    ok('made in Chinese, it carries the Chinese words', zh.name === '自动处理' && zh.prompt === X.composePrompt(['ocr', 'audio', 'link', 'sum'], 'zh'), zh.prompt);
+    DropitPlugin = loadPlugin('en');
+    // changing the ticks
+    const q = X.newRule('claude', null, ALL, false, 'en');
+    X.setParts(q, ['ocr', 'sum']);
+    ok('ticking changes the kinds, and a prompt nobody edited follows', same(q.parts, ['ocr', 'sum']) && same(q.kinds, ['text', 'image', 'file']) && q.prompt === X.composePrompt(['ocr', 'sum'], 'en') && q.prompt.split('\n').length === 4);
+    q.prompt = 'My own words';
+    X.setParts(q, ['link']);
+    ok('a prompt the person wrote stays as it is', q.prompt === 'My own words' && same(q.kinds, ['url']));
+    X.setParts(q, ['sum', 'ocr', 'audio']);
+    ok('the parts keep their order', same(q.parts, ['ocr', 'audio', 'sum']));
+    // picking the command
+    const k = X.newRule('claude', null, ALL, false, 'en');
+    X.pickAgent(k, 'codex', FOUND);
+    ok('picking an agent with no checked settings: a command of the person\'s own, started from its help\'s arguments', k.agent === 'custom' && k.pick === 'codex' && same(k.argv, ['/fake/bin/codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral']), JSON.stringify(k));
+    X.pickAgent(k, 'pi', FOUND);
+    ok('Pi starts with no tools', same(k.argv, ['/fake/bin/pi', '-p', '--no-tools']));
+    X.pickAgent(k, 'claude', FOUND);
+    ok('picking Claude Code again: its own agent, and the command is gone', k.agent === 'claude' && k.pick === 'claude' && !('argv' in k));
+    X.pickAgent(k, 'custom', FOUND);
+    ok('picking a command of one\'s own: an empty command to fill in', k.agent === 'custom' && k.pick === 'custom' && same(k.argv, []));
+    const note = (pick) => { const rr = X.newRule('claude', null, ALL, false, 'en'); X.pickAgent(rr, pick, FOUND); return rr; };
+    ok('the first agent found with checked settings is what a new rule starts from', same(await X.defaultPick({ detect: async () => FOUND }), ['claude', null, ALL]));
+    ok('…else the first found at all, as a command of one\'s own', same(await X.defaultPick({ detect: async () => FOUND.filter((x) => x.id !== 'claude') }), ['codex', ['/fake/bin/codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral'], ALL]));
+    ok('…else a command to write', same(await X.defaultPick({ detect: async () => [] }), ['custom', [], ALL]) && note('claude').agent === 'claude');
+  }
+
+  console.log('── Auto-processing: when it runs, and when it does not ──');
+  {
+    const run = async (agents, item = text(310, LONG), mode = 'note') => {
+      const made = await makePlugin({ mode, ...agentsOf([fakeRule()]), ...(agents ? { agents: { v: 1, consented: true, paused: false, handlers: [fakeRule()], ...agents } } : {}) });
+      serve({ 'GET /v1/pull': pages([item]) });
+      await made.p.sync(false);
+      await made.p.hookQueue;
+      return made;
+    };
+    const base = await run({});
+    ok('on, automatic, confirmed, not paused: it runs', resultsIn(base.files).length === 1);
+    const notConfirmed = await run({ consented: false });
+    ok('not confirmed: nothing runs, even for a rule that is on', resultsIn(notConfirmed.files).length === 0 && notConfirmed.p.runs.length === 0);
+    const paused = await run({ paused: true });
+    ok('paused: nothing runs', resultsIn(paused.files).length === 0 && paused.p.runs.length === 0);
+    const off = await run({ handlers: [fakeRule({ enabled: false })] });
+    ok('a rule that is off does not run', resultsIn(off.files).length === 0 && off.p.runs.length === 0);
+    const byHandOnly = await run({ handlers: [fakeRule({ auto: false })] });
+    ok('a rule that is only for by-hand does not run by itself', resultsIn(byHandOnly.files).length === 0 && byHandOnly.p.runs.length === 0);
+    const wrongKind = await run({ handlers: [fakeRule({ kinds: ['url'] })] });
+    ok('a kind the rule does not list is skipped, and the run says so', resultsIn(wrongKind.files).length === 0 && wrongKind.p.runs[0]?.why === 'skipped:kind', JSON.stringify(wrongKind.p.runs));
+    const tooShort = await run({ handlers: [fakeRule({ minChars: 500 })] });
+    ok('a minimum length the person set is honoured', resultsIn(tooShort.files).length === 0 && tooShort.p.runs[0]?.why === 'skipped:short');
+    const noMin = await run({ handlers: [fakeRule()] }, text(311, 'ok'));
+    ok('…and with none set, a two-letter text is processed (dropit sets no minimum)', resultsIn(noMin.files).length === 1);
+    const exited = await run({ handlers: [fakeRule({ prompt: 'MODE:fail' })] });
+    ok('a failing agent never stops the item arriving: the run says why', [...exited.files.keys()].some((k) => k.startsWith('Inbox/09-17 08.00')) && resultsIn(exited.files).length === 0
+      && exited.p.runs[0]?.why === 'exit:3' && /boom/.test(exited.p.runs[0].detail) && exited.p.settings.cursor === 310, JSON.stringify(exited.p.runs));
+    ok('…and it is said on screen, once', notices.filter((n) => /couldn’t process #310/.test(n)).length === 1, notices.join('|'));
+    const missing = await run({ handlers: [fakeRule({ agent: 'claude', argv: undefined })] });
+    ok('an agent that is not on this computer is a failed run, not a crash', resultsIn(missing.files).length === 0 && missing.p.runs[0]?.why === 'agent-missing');
+    ok('…and nothing was started for it', missing.p.runs.length === 1);
+    notices.length = 0;
+    const twice = await makePlugin(agentsOf([fakeRule({ prompt: 'MODE:fail' })]));
+    serve({ 'GET /v1/pull': pages([text(380, 'a'), text(381, 'b')]) });
+    await twice.p.sync(false);
+    await twice.p.hookQueue;
+    ok('two failures in a row are one message, not two: a missing agent would fill the screen', twice.p.runs.length === 2 && notices.filter((n) => /couldn’t process/.test(n)).length === 1, notices.join('|'));
+  }
+
+  console.log('── Auto-processing: the answer, with the source kept ──');
+  {
+    const body = `${LONG} MODE:echo`;
+    const { p, files } = await makePlugin(agentsOf([fakeRule()]));
+    serve({ 'GET /v1/pull': pages([text(320, body)]) });
+    await p.sync(false);
+    await p.hookQueue;
+    const original = [...files.keys()].find((k) => k.endsWith('.md') && !k.includes(' · '));
+    const answer = resultsIn(files)[0];
+    ok('named after the original and the rule, in the same folder', answer === `${original.slice(0, -3)} · Fake.md`, `${original} → ${answer}`);
+    const lines = (files.get(answer) ?? '').split('\n');
+    ok('what arrived quoted, a rule, a blank line, then the answer', lines[0] === `> ${body}` && lines[1] === '' && lines[2] === '---' && lines[3] === '' && /^SUMMARY \d+$/.test(lines[4]), JSON.stringify(lines));
+    ok('the original is untouched: still just its front matter and the text as sent', files.get(original).endsWith(`${body}\n`) && !files.get(original).includes('SUMMARY'), files.get(original));
+    ok('the run says it was done, with the item\'s number and kind', p.runs.length === 1 && p.runs[0].ok === true && p.runs[0].seq === 320 && p.runs[0].kind === 'text');
+    ok('the answer note carries no front matter of ours, so a later pull never mistakes it for an item', !files.get(answer).startsWith('---'));
+
+    const kept = files.get(answer);
+    const before = p.runs.length;
+    serve({ 'GET /v1/pull': pages([text(320, body)]), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+    await p.repull('all');
+    await p.hookQueue;
+    ok('pulling again does not process it again', resultsIn(files).length === 1 && files.get(answer) === kept && p.runs.length === before, JSON.stringify(p.runs));
+
+    // The name is taken (by an earlier run, or by the person): skip, and leave what is there alone
+    const taken = await makePlugin(agentsOf([fakeRule()]));
+    taken.files.set(`Inbox/${X.noteTitle(text(321, LONG))} · Fake.md`, 'mine');
+    serve({ 'GET /v1/pull': pages([text(321, `${LONG}`)]) });
+    await taken.p.sync(false);
+    await taken.p.hookQueue;
+    const mine = [...taken.files.keys()].filter((k) => k.includes(' · '));
+    ok('a name that is already taken is skipped: nothing replaced, nothing numbered, no run', mine.length === 1 && taken.files.get(mine[0]) === 'mine' && taken.p.runs[0]?.why === 'skipped:exists', JSON.stringify([mine, taken.p.runs]));
+
+    // Notes that hold several items: each item gets its own answer, by number
+    const daily = await makePlugin({ mode: 'append', appendPath: 'Inbox/dropit.md', ...agentsOf([fakeRule({ keepSource: false })]) });
+    serve({ 'GET /v1/pull': pages([text(330, 'first MODE:echo'), text(331, 'second MODE:echo')]) });
+    await daily.p.sync(false);
+    await daily.p.hookQueue;
+    ok('an appended note holds many items, so even with the source not kept each answer is its own note, named with the item\'s number', [...daily.files.keys()].filter((k) => k.includes(' · ')).sort().join() === 'Inbox/dropit · Fake (330).md,Inbox/dropit · Fake (331).md', [...daily.files.keys()].join());
+    ok('…and each quotes what arrived', daily.files.get('Inbox/dropit · Fake (331).md').startsWith('> second MODE:echo\n\n---\n\n'));
+    ok('…and the appended note has only what was appended', !daily.files.get('Inbox/dropit.md').includes('SUMMARY') && !daily.files.get('Inbox/dropit.md').includes('---\n\nSUMMARY'));
+
+    // Names: safe on every system, and short
+    ok('a rule name with characters a file name cannot hold is made safe', X.resultPath('Inbox/a.md', 'A/B: C*', null) === 'Inbox/a · A B C.md', X.resultPath('Inbox/a.md', 'A/B: C*', null));
+    ok('a note at the top of the vault gets its answer there too', X.resultPath('a.md', 'R', null) === 'a · R.md', X.resultPath('a.md', 'R', null));
+
+    // Chinese interface
+    DropitPlugin = loadPlugin('zh');
+    const zh = await makePlugin(agentsOf([fakeRule()]));
+    serve({ 'GET /v1/pull': pages([text(340, 'zh MODE:echo')]) });
+    await zh.p.sync(false);
+    await zh.p.hookQueue;
+    ok('a Chinese interface quotes the same way', zh.files.get(resultsIn(zh.files)[0]).startsWith('> zh MODE:echo\n\n---\n\n'));
+    DropitPlugin = loadPlugin('en');
+  }
+
+  console.log('── Auto-processing: the source not kept — a received text or link becomes its answer ──');
+  {
+    const body = `${LONG} MODE:echo`;
+    const rule = fakeRule({ keepSource: false });
+    const made = await makePlugin(agentsOf([rule]));
+    serve({ 'GET /v1/pull': pages([text(400, body, { meta: { from: { url: 'https://example.com/post', title: 'A Post' } } })]) });
+    await made.p.sync(false);
+    await made.p.hookQueue;
+    const notes = notesIn(made.files);
+    ok('one note, and no second one beside it', notes.length === 1 && resultsIn(made.files).length === 0, [...made.files.keys()].join());
+    const note = made.files.get(notes[0]);
+    ok('its front matter is still there, then what arrived quoted, a rule, then the answer', /^---\n[\s\S]*dropit_seq: 400[\s\S]*\n---\n\n> /.test(note) && note.includes(`\n---\n\n> ${body}\n\n---\n\nSUMMARY`), note);
+    ok('…and the page it came from stays at the end', /\n\n— \[A Post\]\(<?https:\/\/example\.com\/post>?\)\n$/.test(note), note);
+    ok('the run says it was done, and where', made.p.runs[0].ok === true && made.p.runs[0].seq === 400);
+    const kept = note;
+    serve({ 'GET /v1/pull': pages([text(400, body)]), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+    await made.p.repull('all');
+    await made.p.hookQueue;
+    ok('pulling again changes nothing and runs nothing', made.files.get(notes[0]) === kept && made.p.runs.length === 1, JSON.stringify(made.p.runs));
+
+    // a failed run leaves the note as it arrived
+    const failing = await makePlugin(agentsOf([fakeRule({ keepSource: false, prompt: 'MODE:fail' })]));
+    serve({ 'GET /v1/pull': pages([text(401, 'plain words')]) });
+    await failing.p.sync(false);
+    await failing.p.hookQueue;
+    const fnote = failing.files.get(notesIn(failing.files)[0]);
+    ok('a failed run leaves the note exactly as it arrived', fnote.endsWith('\n\nplain words\n') && !fnote.includes('SUMMARY') && failing.p.runs[0].why === 'exit:3', fnote);
+
+    // a link
+    const link = await makePlugin(agentsOf([fakeRule({ keepSource: false, kinds: ['url'], prompt: 'MODE:echo' })]));
+    serve({ 'GET /v1/pull': pages([{ seq: 402, kind: 'url', source: 'web', raw: 'https://example.com/a', created_at: AT, bytes: 21, meta: { title: 'A page' } }]) });
+    await link.p.sync(false);
+    await link.p.hookQueue;
+    ok('a link is quoted with its title', link.files.get(notesIn(link.files)[0]).includes('> [A page](<https://example.com/a>)\n\n---\n\n'), link.files.get(notesIn(link.files)[0]));
+
+    // notes that cannot become their answer: appended, daily, a batch, or text that came with files
+    for (const mode of ['append', 'daily']) {
+      const m = await makePlugin({ mode, appendPath: 'Inbox/dropit.md', ...agentsOf([fakeRule({ keepSource: false })]) });
+      serve({ 'GET /v1/pull': pages([text(410, 'one MODE:echo')]) });
+      await m.p.sync(false);
+      await m.p.hookQueue;
+      ok(`${mode}: the note stays as it is and the answer is a note beside it`, resultsIn(m.files).length === 1 && !(m.files.get(notesIn(m.files).find((k) => !m.files.get(k).startsWith('> '))) ?? '').includes('SUMMARY'), [...m.files.keys()].join());
+    }
+    ok('a text that came with a file is not replaced either', !made.p.canReplace(rule, { kind: 'text', batch: null, files: ['Inbox/a.png'] }) && !made.p.canReplace(rule, { kind: 'text', batch: { id: 'b' }, files: [] }) && made.p.canReplace(rule, { kind: 'url', batch: null, files: [] }) && !made.p.canReplace(rule, { kind: 'image', batch: null, files: [] }) && !made.p.canReplace({ ...rule, keepSource: true }, { kind: 'text', batch: null, files: [] }));
+    // edited meanwhile: nothing is touched
+    const edit = await makePlugin(agentsOf([]));
+    edit.files.set('Inbox/n.md', '---\nkind: text\ndropit_seq: 9\n---\n\nI rewrote this\n');
+    const left = await edit.p.replaceBody({ note: 'Inbox/n.md', text: 'what arrived' }, '> what arrived\n\n---\n\nanswer\n');
+    ok('a note whose text is no longer what arrived is left alone', left === false && edit.files.get('Inbox/n.md') === '---\nkind: text\ndropit_seq: 9\n---\n\nI rewrote this\n');
+    const done = await edit.p.replaceBody({ note: 'Inbox/n.md', text: 'I rewrote this' }, '> I rewrote this\n\n---\n\nanswer\n');
+    ok('…and one that still holds it becomes the document, front matter kept', done === true && edit.files.get('Inbox/n.md') === '---\nkind: text\ndropit_seq: 9\n---\n\n> I rewrote this\n\n---\n\nanswer\n', edit.files.get('Inbox/n.md'));
+    ok('a note that is gone is not an error', (await edit.p.replaceBody({ note: 'Inbox/gone.md', text: 'x' }, 'y')) === false);
+    // something added to the note while the agent worked: the original text is still in it, but the note is no longer what the run began from
+    const snap = '---\nkind: text\ndropit_seq: 10\n---\n\nwhat arrived\n';
+    edit.files.set('Inbox/m.md', snap + '\nMY OWN NOTES ADDED AFTER\n');
+    const keptAdd = await edit.p.replaceBody({ note: 'Inbox/m.md', text: 'what arrived' }, '> what arrived\n\n---\n\nanswer\n', snap);
+    ok('an addition made while the agent worked is not overwritten, even though the original text is still there', keptAdd === false && edit.files.get('Inbox/m.md') === snap + '\nMY OWN NOTES ADDED AFTER\n');
+    edit.files.set('Inbox/m.md', snap);
+    const same = await edit.p.replaceBody({ note: 'Inbox/m.md', text: 'what arrived' }, '> what arrived\n\n---\n\nanswer\n', snap);
+    ok('…and a note exactly as it was when the run began becomes the answer', same === true && edit.files.get('Inbox/m.md').includes('answer'));
+    // by hand it never replaces
+    const hand = await makePlugin(agentsOf([fakeRule({ keepSource: false })]));
+    hand.files.set('Inbox/09-17 08.00 plan.md', '---\nkind: text\nsource: cli\ncreated: 2026-09-17T08:00:00.000Z\ndropit_seq: 420\n---\n\nPlan it MODE:echo\n');
+    const byHand = await hand.p.processWith(hand.p.settings.agents.handlers[0], { seq: 420, kind: 'text', text: 'Plan it MODE:echo', meta: {}, files: [], note: 'Inbox/09-17 08.00 plan.md', batch: null }, { manual: true });
+    ok('processed by hand, the note stays as it was and the answer is a note beside it', byHand.ok && byHand.path === 'Inbox/09-17 08.00 plan · Fake.md' && hand.files.get('Inbox/09-17 08.00 plan.md').endsWith('\n\nPlan it MODE:echo\n'), JSON.stringify(byHand));
+  }
+
+  console.log('── Auto-processing: an answer steered by the content is cleaned, and nothing private is kept ──');
+  {
+    const secret = 'Call Dana at 555-0143 about the unannounced merger. MODE:evil';
+    const { p, files } = await makePlugin(agentsOf([fakeRule()]));
+    serve({ 'GET /v1/pull': pages([text(350, secret)]) });
+    await p.sync(false);
+    await p.hookQueue;
+    const answer = files.get(resultsIn(files)[0]) ?? '';
+    ok('no remote image, no HTML, no query or template syntax in what is written', !/evil\.example/.test(answer) && !/<img/.test(answer) && !/dataviewjs/.test(answer) && !/`= /.test(answer) && !answer.includes('<%'), answer);
+    const stored = JSON.stringify(p.stored);
+    ok('the settings hold neither the key nor any of the item\'s text', !stored.includes('555-0143') && !stored.includes('merger') && (stored.match(/dk_x/g) ?? []).length === 1, stored);
+    ok('a failure\'s detail has any key taken out', X.scrubDetail('denied: dk_abcDEF123-_x and tokenvalue', 'tokenvalue') === 'denied: dk_… and …');
+    const failing = await makePlugin({ token: 'dk_secretvalue', ...agentsOf([fakeRule({ prompt: 'MODE:fail' })]) });
+    serve({ 'GET /v1/pull': pages([text(351, 'a MODE:fail')]) });
+    await failing.p.sync(false);
+    await failing.p.hookQueue;
+    ok('and a failed run carries no key', !JSON.stringify(failing.p.runs).includes('dk_secretvalue'));
+    const many = await makePlugin(agentsOf([fakeRule({ kinds: ['url'] })]));
+    for (let i = 1; i <= 60; i++) many.p.record({ at: i, id: 'r1', name: 'Fake', seq: i, kind: 'text', ok: true, ms: 1 });
+    ok('only the last 50 runs are remembered, and only in memory', many.p.runs.length === 50 && many.p.runs[0].seq === 11 && many.p.runs.at(-1).seq === 60 && !('log' in many.p.settings.agents));
+    // a quote of the original does not run as a template either
+    const tp = await makePlugin({ ...agentsOf([fakeRule()]) });
+    tp.p.app.plugins = { plugins: { 'templater-obsidian': { settings: { trigger_on_file_creation: true } } } };
+    serve({ 'GET /v1/pull': pages([text(352, 'a <% tp.x %> b MODE:echo')]) });
+    await tp.p.sync(false);
+    await tp.p.hookQueue;
+    ok('a <% in the quoted original is defused while Templater runs new notes', !resultsIn(tp.files).map((k) => tp.files.get(k)).join('').includes('<% tp.x'), resultsIn(tp.files).map((k) => tp.files.get(k)).join());
+  }
+
+  console.log('── Auto-processing: files, and the one an agent may read ──');
+  {
+    const made = await makePlugin(agentsOf([]));
+    const { p, files } = made;
+    const png = Buffer.from('not really a picture');
+    files.set('Inbox/budget.png', png);
+    files.set('Inbox/09-17 08.00 budget.md', '---\nkind: image\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_seq: 360\n---\n\n![[budget.png]]\n');
+    const payload = { v: 1, seq: 360, kind: 'image', source: 'web', created: '', batch: null, text: '', meta: { filename: 'budget.png', mime: 'image/png' }, note: 'Inbox/09-17 08.00 budget.md', files: ['Inbox/budget.png'] };
+    const reads = await p.readFiles(payload.files, { maxFileMB: 10 });
+    ok('a file is read from the vault into a name and bytes', reads.length === 1 && reads[0].name === 'budget.png' && Buffer.compare(reads[0].data, png) === 0);
+    ok('a file over the size the rule allows is not read', (await p.readFiles(payload.files, { maxFileMB: 0.00001 })) === null);
+
+    // "read this item's files": the agent starts in an empty folder holding copies of them
+    const files1 = fakeRule({ mode: 'files', prompt: 'MODE:env', id: 'f1', name: 'Files' });
+    const out = await p.processWith(files1, payload, { manual: true });
+    const listing = JSON.parse(answerOf(files.get(out.path)));
+    ok('files: the agent sees copies of the item\'s files in an empty working folder, nothing on its command line', out.ok && same(listing.cwd, ['budget.png']) && same(listing.args, []), JSON.stringify(out));
+    ok('…and only PATH, HOME and USER in its environment', listing.env.filter((k) => !['__CF_USER_TEXT_ENCODING', 'PWD', 'SHLVL', '_', 'LC_CTYPE'].includes(k)).sort().join() === 'HOME,PATH,USER', listing.env.join());
+    ok('…and the answer quotes the file as an embed', files.get(out.path).startsWith('> ![[Inbox/budget.png]]\n\n---\n\n'), files.get(out.path));
+    const big = await p.processWith({ ...files1, maxFileMB: 0.00001 }, payload, { manual: true });
+    ok('a file over the limit: skipped, nothing started', big.ok === false && big.why === 'skipped:file-too-big' && p.runs.at(-1).why === 'skipped:file-too-big');
+    const thinking = await p.processWith(fakeRule({ id: 'f2', name: 'Think', prompt: 'MODE:env' }), payload, { manual: true });
+    ok('the plain permission copies no file: the folder is empty', thinking.ok && same(JSON.parse(answerOf(files.get(thinking.path))).cwd, []));
+    // the permission per item: an image gets its file, a text gets none
+    const auto = fakeRule({ id: 'f3', name: 'Auto', mode: 'auto', kinds: ['text', 'image'], prompt: 'MODE:env' });
+    const forImage = await p.processWith(auto, payload, { manual: true });
+    ok('per item: an image\'s file is handed over', forImage.ok && same(JSON.parse(answerOf(files.get(forImage.path))).cwd, ['budget.png']), JSON.stringify(forImage));
+    const forText = await p.processWith(auto, { seq: 361, kind: 'text', text: 'words', meta: {}, files: [], note: 'Inbox/09-17 08.00 budget.md', batch: null }, { manual: true });
+    ok('…and a text gets an empty folder', forText.ok && same(JSON.parse(answerOf(files.get(forText.path))).cwd, []), JSON.stringify(forText));
+    // an image arriving by itself: the file stays where it is, the answer is a note beside it, even with the source not kept
+    const img = await makePlugin(agentsOf([fakeRule({ keepSource: false, mode: 'auto', prompt: 'MODE:env' })]));
+    serve({ 'GET /v1/pull': pages([{ seq: 362, kind: 'image', source: 'web', raw: '', created_at: AT, bytes: 5, url: 'https://files.test/pic.png', meta: { filename: 'pic.png', mime: 'image/png' } }]), 'GET /pic.png': () => ({ bytes: Buffer.from('png!'), status: 200 }) });
+    await img.p.sync(false);
+    await img.p.hookQueue;
+    ok('an image on its own: its note stays as it is even with the source not kept, and the answer is a note beside it', resultsIn(img.files).length === 1 && !img.files.get('Inbox/09-17 08.00 pic.md').includes('SUMMARY') && img.p.runs[0].ok === true, [...img.files.keys()].join());
+  }
+
+  console.log('── Auto-processing: what is left when something goes wrong ──');
+  {
+    // The picture could not be downloaded: its note says so, and the AI is not started on nothing — in any permission
+    for (const mode of ['think', 'auto']) {
+      const m = await makePlugin(agentsOf([fakeRule({ keepSource: false, mode, prompt: 'MODE:env' })]));
+      serve({ 'GET /v1/pull': pages([{ seq: 370, kind: 'image', source: 'android', raw: '', created_at: AT, bytes: 5, url: 'https://files.test/gone.jpg', meta: { filename: 'gone.jpg', mime: 'image/jpeg' } }]), 'GET /gone.jpg': () => ({ status: 500, json: {} }) });
+      await m.p.sync(false);
+      await m.p.hookQueue;
+      const note = [...m.files.keys()].find((k) => k.endsWith('.md') && !k.includes(' · '));
+      ok(`${mode}: a picture that did not download keeps its note with the reason, and nothing is sent to the AI`, /gone\.jpg/.test(m.files.get(note) ?? '') && /dropit_missing|没能下载|couldn't be downloaded/.test(m.files.get(note) ?? '') && resultsIn(m.files).length === 0 && m.p.runs[0]?.why === 'skipped:no-files', `${m.p.runs[0]?.why} · ${[...m.files.keys()].join()}`);
+    }
+    // The AI fails on a text that is meant to be turned into its answer: what arrived is still there, untouched
+    const f = await makePlugin(agentsOf([fakeRule({ keepSource: false, mode: 'auto', prompt: 'MODE:fail' })]));
+    serve({ 'GET /v1/pull': pages([{ seq: 371, kind: 'text', source: 'web', raw: LONG, created_at: AT, bytes: LONG.length }]) });
+    await f.p.sync(false);
+    await f.p.hookQueue;
+    const kept = [...f.files.entries()].find(([k]) => k.endsWith('.md'));
+    ok('the AI fails: the received text is still in its note, as it arrived, and no second note appears', f.p.runs[0]?.ok === false && !!kept && kept[1].includes(LONG) && !kept[1].includes('boom') && resultsIn(f.files).length === 0, `${f.p.runs[0]?.why} · ${[...f.files.keys()].join()}`);
+  }
+
+  console.log('── Auto-processing: by hand ──');
+  {
+    const { p, files, fm, metadataCache } = await makePlugin(agentsOf([fakeRule({ enabled: false, auto: false })]));
+    metadataCache.getFirstLinkpathDest = (link) => (files.has(`Inbox/${link}`) ? { path: `Inbox/${link}`, name: link } : null);
+    files.set('Inbox/budget.png', Buffer.from('png'));
+    const write = (path, content) => { files.set(path, content); const m = /^---\n([\s\S]*?)\n---/.exec(content); const o = {}; for (const l of m[1].split('\n')) { const [k, ...v] = l.split(': '); const val = v.join(': '); o[k] = /^\d+$/.test(val) ? Number(val) : /^\[.*\]$/.test(val) ? JSON.parse(val) : val; } fm.set(path, o); return { path, name: path.split('/').pop(), extension: 'md' }; };
+    const textNote = write('Inbox/09-17 08.00 plan.md', `---\nkind: text\nsource: cli\ncreated: 2026-09-17T08:00:00.000Z\ndropit_seq: 370\n---\n\nPlan the launch MODE:echo\n\n— [A Post](https://example.com/post/1)\n`);
+    const urlNote = write('Inbox/09-17 08.00 link.md', `---\nkind: url\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_seq: 371\n---\n\n[A page](https://example.com/a)\n\n> what it says\n`);
+    const imgNote = write('Inbox/09-17 08.00 pic.md', `---\nkind: image\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_seq: 372\n---\n\n![[budget.png]]\n`);
+    const batchNote = write('Inbox/09-17 08.00 batch.md', `---\nkind: batch\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_batch: bXXXX\ndropit_seq: [373, 374]\n---\n\nthe words\n\n![[budget.png]]\n`);
+    files.set('Inbox/plain.md', 'no front matter at all');
+    const plain = { path: 'Inbox/plain.md', name: 'plain.md', extension: 'md' };
+
+    const a = await p.payloadOfNote(textNote);
+    ok('a received note becomes an item from its front matter: seq, kind, source, the text without the source line', a.seq === 370 && a.kind === 'text' && a.source === 'cli' && a.text === 'Plan the launch MODE:echo' && a.note === textNote.path && a.meta.from.url === 'https://example.com/post/1' && a.meta.from.title === 'A Post', JSON.stringify(a));
+    const b = await p.payloadOfNote(urlNote);
+    ok('a link note: the address as the text, its title and description as meta', b.kind === 'url' && b.text === 'https://example.com/a' && b.meta.title === 'A page' && b.meta.description === 'what it says', JSON.stringify(b));
+    const c = await p.payloadOfNote(imgNote);
+    ok('a file note: no text, its file, its name and type', c.kind === 'image' && c.text === '' && same(c.files, ['Inbox/budget.png']) && c.meta.filename === 'budget.png' && c.meta.mime === 'image/png', JSON.stringify(c));
+    const d = await p.payloadOfNote(batchNote);
+    ok('a batch note: its words, its file, its first number', d.kind === 'text' && d.text === 'the words' && d.seq === 373 && same(d.files, ['Inbox/budget.png']) && d.batch.id === 'bXXXX', JSON.stringify(d));
+    ok('a note that did not come through dropit is not processed', (await p.payloadOfNote(plain)) === null);
+
+    // process-note: the rule is run on the open note — a rule that is off and by-hand-only still runs on purpose
+    p.app.workspace.getActiveFile = () => textNote;
+    const cmd = p.commands.find((x) => x.id === 'process-note');
+    ui.opened.length = 0;
+    cmd.checkCallback(false);
+    await settle(); await settle();
+    const picker = ui.opened.find((m) => m.onChooseItem);
+    ok('"Process this note with…" offers the rule', !!picker && picker.getItems().length === 1 && picker.getItemText(picker.getItems()[0]) === 'Fake');
+    p.settings.agents.consented = false;
+    picker.onChooseItem(picker.getItems()[0]);
+    await settle();
+    // not confirmed yet: it asks first, and nothing has started
+    const consent = ui.opened.find((m) => m instanceof X.ConsentModal);
+    ok('the first time, it asks for confirmation before anything starts', !!consent && p.runs.length === 0 && resultsIn(files).length === 0);
+    ok('…the confirmation is not remembered if it is closed without a yes', (consent.close(), p.settings.agents.consented === false) && p.runs.length === 0);
+    p.settings.agents.consented = true;
+    picker.onChooseItem(picker.getItems()[0]);
+    for (let i = 0; i < 50 && !resultsIn(files).length; i++) await new Promise((r) => setTimeout(r, 20));
+    const made = resultsIn(files);
+    ok('a note processed by hand gets its answer beside it, quoting what it holds', made.join() === 'Inbox/09-17 08.00 plan · Fake.md' && files.get(made[0]).startsWith('> Plan the launch MODE:echo\n\n---\n\n'), made.join());
+    ok('…and the original is as it was', files.get(textNote.path).endsWith('Plan the launch MODE:echo\n\n— [A Post](https://example.com/post/1)\n') && !files.get(textNote.path).includes('SUMMARY'));
+    ok('…and a notice says where it went', notices.at(-1)?.includes('plan · Fake'), notices.at(-1));
+    // again: on purpose, so a number rather than a skip
+    await p.rerunLast();
+    ok('"Re-run the last handler" runs it again, on the same item, into a numbered note', resultsIn(files).sort().join() === 'Inbox/09-17 08.00 plan · Fake 2.md,Inbox/09-17 08.00 plan · Fake.md', resultsIn(files).join());
+    const none = await makePlugin(agentsOf([fakeRule()]));
+    notices.length = 0;
+    await none.p.rerunLast();
+    ok('with nothing run yet, it says so', notices.at(-1) === X.STRINGS.en.agents.nothingToRerun, notices.at(-1));
+    p.app.workspace.getActiveFile = () => plain;
+    notices.length = 0;
+    await p.processNote(plain);
+    ok('on a note that is not from dropit, it says so', notices.at(-1) === X.STRINGS.en.agents.notDropitNote, notices.at(-1));
+    const latest = await p.latestPayload();
+    ok('the latest item is found from the notes when nothing was received this session', latest?.kind === 'text' || latest?.kind === 'image' || latest?.kind === 'url', JSON.stringify(latest));
+  }
+
+  console.log('── Auto-processing: the settings page ──');
+  {
+    const A = X.STRINGS.en.agents;
+    const U = X.STRINGS.en.set;
+    const { p } = await makePlugin();
+    p.detect = async () => FOUND;
+    p.tab.containerEl = anything();
+    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 });
+    const reset = () => { ui.names.length = 0; ui.buttons.length = 0; ui.toggles.length = 0; ui.dropdowns.length = 0; ui.opened.length = 0; };
+    const draw = async () => { reset(); thenCalls = 0; p.tab.display(); for (let i = 0; i < 10; i++) await settle(); };
+    await draw();
+    ok('a desktop with no rule: one switch to turn it on, and nothing more to set yet', ui.toggles.some((x) => x.name === U.ai && x.value === false) && !ui.names.includes(U.agent) && !ui.names.includes(U.command) && thenCalls < 50, ui.names.join('|'));
+    ok('…the groups: receiving, after it arrives, devices, advanced — in this order, each with a name', ['receiving', 'after', 'devices', 'advanced'].every((k) => U[k] && X.STRINGS.zh.set[k]));
+    const turnOn = ui.toggles.find((x) => x.name === U.ai);
+    const turning = turnOn.change(true);
+    await settle(); await settle();
+    const consent = ui.opened.find((m) => m instanceof X.ConsentModal);
+    ok('turning it on shows what will happen first, and writes nothing yet', !!consent && p.settings.agents.handlers.length === 0 && p.settings.agents.consented === false);
+    const sink = [];
+    consent.contentEl.createEl = (tag, o) => { sink.push(o?.text); return anything(); };
+    consent.onOpen();
+    ok('…all matching items go to the agent, dropit does not handle or keep them; the full command is shown; a received text or link becomes one note',
+      sink.some((x) => /handed to the agent you chose/.test(x ?? '') && /does not handle it or keep it/.test(x ?? '')) && sink.some((x) => x === A.consentRuns) && /becomes one note/.test(A.consentResult) && /生成|变成一篇笔记/.test(X.STRINGS.zh.agents.consentResult));
+    ui.buttons.filter((b) => b.text === A.consentGo).at(-1).click();
+    await turning;
+    for (let i = 0; i < 6; i++) await settle();
+    const rule = p.settings.agents.handlers[0];
+    ok('confirming writes consented and makes the rule from what is on this computer: Claude Code, all four parts, the source not kept, turned on',
+      p.settings.agents.consented === true && p.settings.agents.handlers.length === 1 && rule.enabled === true && rule.agent === 'claude' && rule.pick === 'claude' && rule.name === 'Auto'
+      && same(rule.parts, ALL) && rule.keepSource === false && rule.mode === 'auto', JSON.stringify(p.settings.agents));
+    ok('…and it was saved', p.stored.agents.consented === true && p.stored.agents.handlers.length === 1);
+
+    await draw();
+    ok('with the rule: the agent, its command, what to handle, keep the original, try it — and the Obsidian command under them', [U.agent, U.handle, U.runCommand].every((n) => ui.names.includes(n)) && ui.buttons.some((x) => x.text === U.tryButton), ui.names.join('|'));
+    ok('…the Obsidian command is a row of its own, beside the AI switch (not one of its options): both can be on', ui.names.includes(U.ai) && ui.names.includes(U.runCommand) && /either, both, or neither/.test(U.runCommandTip) && /都开/.test(X.STRINGS.zh.set.runCommandTip));
+    ok('…the group is named for what it does', X.STRINGS.zh.set.after === '收到之后自动处理');
+    rule.enabled = false;
+    await draw();
+    ok('switched off: the AI\'s rows fold away (no agent, command, boxes, try) while the Obsidian command stays', ui.toggles.some((x) => x.name === U.ai && x.value === false) && ![U.agent, U.handle].some((n) => ui.names.includes(n)) && !ui.buttons.some((x) => x.text === U.tryButton) && ui.names.includes(U.runCommand), ui.names.join('|'));
+    rule.enabled = true;
+    await draw();
+    ok('…and none of the old blocks: no "what each kind gets", no "see what would happen", no example item', !ui.names.some((n) => /each kind gets|would happen|Example item/i.test(n)));
+    ok('…no pause switch, no list of rules, no record of runs', !ui.names.some((n) => /pause|Recent runs|Rules/i.test(n)));
+    ok('…the AI limits are one row under the AI, and the exact command is a button on the command row: neither is in Advanced', !ui.names.includes(U.showCommand) && ui.buttons.some((b) => b.text === U.showButton) && Object.keys(U.lim).length === 5 && Object.keys(X.STRINGS.zh.set.lim).length === 5);
+    ok('…the other order of things: the AI comes before the Obsidian command', ui.names.indexOf(U.ai) < ui.names.indexOf(U.runCommand));
+    const dd = ui.dropdowns.find((d) => d.name === U.agent);
+    ok('the agent list has what was found here, and a command of one\'s own: not what is missing', same(Object.keys(dd.options), ['claude', 'codex', 'pi', 'custom']) && dd.value === 'claude', JSON.stringify(dd));
+
+    // what to handle: the boxes
+    X.toggleHandle(rule, 'ocr', false);
+    ok('unticking a part takes its kinds out and rewrites the prompt', same(rule.parts, ['audio', 'link', 'sum']) && same(rule.kinds, ['text', 'url', 'video', 'file']) && !rule.prompt.includes('Image or PDF'));
+    X.toggleHandle(rule, 'ocr', true);
+    ok('ticking it again puts it back', same(rule.parts, ALL) && rule.prompt.includes('Image or PDF'));
+    rule.prompt = 'My own words';
+    X.toggleHandle(rule, 'audio', false);
+    ok('a prompt the person wrote is not rewritten by ticking', rule.prompt === 'My own words' && !rule.kinds.includes('video'));
+    X.toggleHandle(rule, 'audio', true);
+    ok('the boxes are in the order text, links, images, audio — the labels say what each does', same(X.ORDER_UI ?? ['sum', 'link', 'ocr', 'audio'], ['sum', 'link', 'ocr', 'audio']) && U.handleOpts.sum === 'Text' && X.STRINGS.zh.set.handleOpts.audio === '语音和视频');
+
+    await draw();
+    rule.keepSource = true; await p.save();
+    ok('keep the original is kept (a box at the end of the row of what to handle)', rule.keepSource === true && p.stored.agents.handlers[0].keepSource === true && U.keepOriginal && X.STRINGS.zh.set.keepOriginal);
+
+    // a rule saved by an earlier version
+    {
+      const old = { id: 'r1', name: 'x', enabled: true, auto: true, agent: 'claude', pick: 'claude', kinds: ['text', 'url', 'image'], mode: 'think', parts: ['ocr', 'audio', 'link', 'sum'], prompt: '先判断这条内容是什么（文章、截图、待办、联系方式、收据……）。然后用内容所用的语言：给出 3 点以内的要点。' };
+      const up = X.normalizeAgents({ handlers: [old] }).handlers[0];
+      ok('an old default prompt becomes today\'s, and a fixed no-tools mode becomes "by the item" (so links are opened and pictures read)', up.prompt === X.composePrompt(ALL, 'en') || up.prompt === X.composePrompt(ALL, 'zh'), up.prompt.slice(0, 40));
+      ok('…the mode is auto', up.mode === 'auto');
+      const mine = X.normalizeAgents({ handlers: [{ ...old, prompt: 'My own words', mode: 'auto' }] }).handlers[0];
+      ok('a prompt the person wrote is left alone', mine.prompt === 'My own words');
+      const prev = X.normalizeAgents({ handlers: [{ ...old, mode: 'auto', parts: ['sum'], prompt: 'Something arrived from another device. Work out what it is, then handle it by type:\n- Text: tidy it into a few clear sentences; if it holds things to do, list them at the end.\nOutput only the result, no greeting.' }] }).handlers[0];
+      ok('the previous default (any ticked parts) is brought up too', prev.prompt === X.composePrompt(['sum'], 'en') || prev.prompt === X.composePrompt(['sum'], 'zh'));
+      const own = X.normalizeAgents({ handlers: [{ ...old, agent: 'custom', argv: ['x'], mode: 'think', prompt: 'mine' }] }).handlers[0];
+      ok('a command of one\'s own keeps its mode', own.mode === 'think');
+    }
+
+    // the command line
+    ok('the command is always shown: for Claude the checked default, written out, not hidden behind "custom"', X.shownCommand(rule, 'claude') === 'claude -p --safe-mode --tools "" --strict-mcp-config --no-session-persistence' && !X.isEdited(rule, 'claude'), X.shownCommand(rule, 'claude'));
+    X.applyCommand(rule, 'claude', 'claude -p --model haiku --tools ""', X.commandLine('claude'), FOUND);
+    ok('editing it makes it the person\'s own command, run exactly as written; the preset is not used any more', rule.agent === 'custom' && same(rule.argv, ['claude', '-p', '--model', 'haiku', '--tools', '']) && X.isEdited(rule, 'claude'), JSON.stringify(rule));
+    ok('…and what is shown is what was written', X.shownCommand(rule, 'claude') === 'claude -p --model haiku --tools ""', X.shownCommand(rule, 'claude'));
+    X.applyCommand(rule, 'claude', 'claude -p --safe-mode --tools "" --strict-mcp-config --no-session-persistence', X.commandLine('claude'), FOUND);
+    ok('typing the default line back brings the checked preset back', rule.agent === 'claude' && !('argv' in rule) && !X.isEdited(rule, 'claude'));
+    X.applyCommand(rule, 'claude', 'claude -p --x', X.commandLine('claude'), FOUND);
+    X.pickAgent(rule, 'claude', FOUND);
+    ok('Reset does the same', rule.agent === 'claude' && !('argv' in rule));
+
+    // picking another agent
+    await draw();
+    await ui.dropdowns.find((d) => d.name === U.agent).change('codex');
+    ok('picking Codex: a command of one\'s own, started from the arguments its help suggests, and saved', rule.agent === 'custom' && rule.pick === 'codex' && same(rule.argv, ['/fake/bin/codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral']) && p.stored.agents.handlers[0].pick === 'codex', JSON.stringify(rule));
+    await draw();
+    ok('…and the page shows the command to edit', ui.buttons.some((b) => b.text === U.reset) && ui.dropdowns.find((d) => d.name === U.agent).value === 'codex');
+    ok('…it is not "edited" until the person changes it, and its default can be brought back', !X.isEdited(rule, 'codex', '/fake/bin/codex') && (X.applyCommand(rule, 'codex', 'codex exec --yolo', X.commandLine('codex', '/fake/bin/codex'), FOUND), X.isEdited(rule, 'codex', '/fake/bin/codex')));
+    await ui.dropdowns.find((d) => d.name === U.agent).change('custom');
+    ok('picking one\'s own command keeps what was there', rule.agent === 'custom' && rule.pick === 'custom' && rule.argv.length >= 2);
+    await ui.dropdowns.find((d) => d.name === U.agent).change('claude');
+    ok('and picking Claude Code is its own agent again', rule.agent === 'claude' && !('argv' in rule));
+
+    // turning it off and on again: no second confirmation, no second rule
+    await draw();
+    await ui.toggles.find((x) => x.name === U.ai).change(false);
+    ok('off: the rule stays, switched off', p.settings.agents.handlers.length === 1 && rule.enabled === false);
+    await draw();
+    ui.opened.length = 0;
+    await ui.toggles.find((x) => x.name === U.ai).change(true);
+    ok('on again: no second confirmation and no second rule', !ui.opened.some((m) => m instanceof X.ConsentModal) && p.settings.agents.handlers.length === 1 && rule.enabled === true);
+    // a rule that exists but was never confirmed asks first
+    const fresh = await makePlugin(agentsOf([fakeRule({ enabled: false })], { consented: false }));
+    fresh.p.detect = async () => FOUND;
+    fresh.p.tab.containerEl = anything();
+    fresh.p.api = p.api;
+    reset();
+    fresh.p.tab.display();
+    for (let i = 0; i < 10; i++) await settle();
+    const sw = ui.toggles.find((x) => x.name === U.ai);
+    const asking = sw.change(true);
+    await settle();
+    ok('switching it on before the confirmation asks first, and leaves it off', ui.opened.some((m) => m instanceof X.ConsentModal) && fresh.p.settings.agents.handlers[0].enabled === false && fresh.p.settings.agents.consented === false);
+    ui.opened.find((m) => m instanceof X.ConsentModal).close();
+    await asking;
+    ok('…declining changes nothing', fresh.p.settings.agents.consented === false && fresh.p.settings.agents.handlers[0].enabled === false);
+    const draws = (() => { thenCalls = 0; fresh.p.tab.display(); return thenCalls; })();
+    ok('the page draws without a promise adopting a Setting', draws < 50);
+    ok('the page says only {{kind}} means anything in a prompt', /\{\{kind\}\}/.test(U.promptTip) && /\{\{kind\}\}/.test(X.STRINGS.zh.set.promptTip));
+  }
+
+  console.log('── The command line: words in, words out ──');
+  {
+    const same2 = (line, argv) => same(X.splitCommand(line), argv) && X.splitCommand(X.joinCommand(argv)).every((w, i) => w === argv[i]) && X.splitCommand(X.joinCommand(argv)).length === argv.length;
+    ok('plain words', same2('claude -p', ['claude', '-p']));
+    ok('an empty argument survives a round trip (the default has one: --tools "")', same2('claude --tools "" -p', ['claude', '--tools', '', '-p']));
+    ok('quotes keep a word with spaces together, single or double', same(X.splitCommand('a "b c" \'d e\' f'), ['a', 'b c', 'd e', 'f']));
+    ok('a backslash keeps the next character; inside single quotes it is just a backslash', same(X.splitCommand('a\\ b "c\\"d" \'e\\f\''), ['a b', 'c"d', 'e\\f']));
+    ok('extra spaces and a blank line are nothing', same(X.splitCommand('  a   b  '), ['a', 'b']) && same(X.splitCommand(''), []));
+    ok('what needs quoting is quoted when shown, and read back the same', same2('x "a b" "q\\"r"', ['x', 'a b', 'q"r']));
+    ok('nothing is ever handed to a shell: a $ or ; is only a character', same(X.splitCommand('echo $HOME; rm -rf /'), ['echo', '$HOME;', 'rm', '-rf', '/']));
+  }
+
+  console.log('── Auto-processing: see what would happen (runs nothing) ──');
+  {
+    const A = X.STRINGS.en.agents;
+    const claude = { ...X.newRule('claude', null, ALL, false, 'en'), enabled: true };
+    const pv = X.previewOf(claude, 'text', { bin: '/opt/homebrew/bin/claude', base: { PATH: '/x', HOME: '/h', USER: 'u', SECRET_KEY: 's' } });
+    ok('the final command: the program, then the arguments, no content in them', same(pv.argv, ['/opt/homebrew/bin/claude', '-p', '--safe-mode', '--tools', '', '--strict-mcp-config', '--no-session-persistence']) && !pv.argv.join(' ').includes('supplier'), JSON.stringify(pv.argv));
+    ok('the whole input: the prompt, the warning, then the content block', pv.input.startsWith(claude.prompt) && /untrusted data/.test(pv.input) && pv.input.includes('<content kind="text">') && pv.input.includes(A.sampleText));
+    ok('the environment: PATH, USER and HOME and nothing else', same(Object.keys(pv.env).sort(), ['HOME', 'PATH', 'USER']) && pv.env.PATH.startsWith('/opt/homebrew/bin:'), JSON.stringify(pv.env));
+    ok('on, automatic: the verdict says it would run, with the permission in words', /Would run Claude Code, permission “Read the text only”/.test(pv.notes.join('\n')), pv.notes.join('|'));
+    ok('only {{kind}} is filled in; any other variable is dropped from the input', X.previewOf({ ...claude, prompt: 'A {{kind}} B {{text}} C {{title}}' }, 'url').input.startsWith('A url B  C'), X.previewOf({ ...claude, prompt: 'A {{kind}} B {{text}} C' }, 'url').input.slice(0, 20));
+    ok('paused: the verdict says nothing will run by itself', X.previewOf(claude, 'text', { paused: true }).notes[0] === A.pvPaused);
+    ok('off: the verdict says it will not run by itself', X.previewOf({ ...claude, enabled: false }, 'text').notes[0] === A.pvOff);
+    ok('a kind the rule does not list: skipped, with the reason, and no command', (() => { const r = X.previewOf({ ...claude, kinds: ['url'] }, 'text'); return r.argv === null && r.notes.at(-1) === A.pvSkip(X.STRINGS.en.agents.why['skipped:kind']); })());
+    ok('a minimum length the person set shows up for a short text', X.previewOf({ ...claude, minChars: 50 }, 'short').argv === null && X.previewOf({ ...claude, minChars: 5 }, 'short').argv !== null);
+    const image = X.previewOf(claude, 'image');
+    ok('per item: an image is given its file, so the argument list names the read permission and the input lists the file', image.argv.includes('Read(./**)') && image.input.includes('files in the working directory: ./budget.png') && !image.notes.includes(A.pvMetaOnly), JSON.stringify(image.argv));
+    const web = X.previewOf(claude, 'url');
+    ok('per item: a link may open its own site and no other', web.argv.includes('WebFetch(domain:example.com)') && !web.notes.includes(A.pvNoWeb), JSON.stringify(web.argv));
+    ok('a rule that names the plain permission: an image shows only its name and type', X.previewOf({ ...claude, mode: 'think' }, 'image').notes.includes(A.pvMetaOnly) && X.previewOf({ ...claude, mode: 'think' }, 'url').notes.includes(A.pvNoWeb));
+    ok('a custom command: exactly the list the person typed, and the first item is the program', same(X.previewOf(fakeRule(), 'text', {}).argv, [process.execPath, FAKE]));
+    ok('commandOf finds the command a rule would start, for the first-time confirmation', same(X.commandOf(claude, { bin: '/c/claude' }).argv.slice(0, 2), ['/c/claude', '-p']) && X.commandOf({ ...claude, kinds: [] }, {}).argv === null);
+  }
+
+  // ── the sentences for the limits, and the way past the ones the paid plan lifts ──
+  {
+    const { errorText, apiError, errorNotice, safeLink, STRINGS } = DropitPlugin;
+    for (const [u, want] of [["https://dropit.example/upgrade?u=1", "https://dropit.example/upgrade?u=1"], ["http://127.0.0.1:8799/upgrade", "http://127.0.0.1:8799/upgrade"], ["http://localhost:8780/x", "http://localhost:8780/x"], ["javascript:alert(1)", null], ["data:text/html,<b>x</b>", null], ["file:///etc/passwd", null], ["obsidian://open?vault=x", null], ["http://evil.example/up", null], ["//evil.example/x", null], ["", null], [null, null]]) ok(`a link from the service: ${String(u).slice(0, 40)}`, safeLink(u) === want, String(safeLink(u)));
+    const en = STRINGS.en, zh = STRINGS.zh;
+    const at = new Date(2026, 9, 4, 22, 15).getTime();
+    ok('too large: the limit from the answer', errorText('PAYLOAD_TOO_LARGE', { field: 'size', limit: 5242880 }, 413, en) === 'Larger than 5 MB, the most one item can be');
+    ok('too large, zh, fractional', errorText('PAYLOAD_TOO_LARGE', { field: 'size', limit: 1572864 }, 413, zh) === '超过了单条上限 1.5 MB');
+    ok('today\'s sends: when it is back', errorText('RATE_LIMITED', { window: 'day', retry_after: 7200 }, 429, en, at) === "Today's sends are used up — back at 00:15");
+    ok('signup limit: how many and when it opens again, zh too, and the plain sentence without a time', /5 accounts/.test(errorText('SIGNUP_LIMITED', { retry_after: 1800, limit: 5 }, 429, en, at)) && /5 个账号/.test(errorText('SIGNUP_LIMITED', { retry_after: 1800, limit: 5 }, 429, zh, at)) && errorText('SIGNUP_LIMITED', {}, 429, en, at) === en.errors.SIGNUP_LIMITED);
+    ok('today\'s uploads and downloads have their own sentences', errorText('RATE_LIMITED', { window: 'day', field: 'uploads', retry_after: 90 }, 429, en, at) === "Today's file uploads are used up — back at 22:16"
+      && errorText('RATE_LIMITED', { window: 'day', field: 'downloads', retry_after: 90 }, 429, zh, at) === '今天的下载次数用完了，22:16 恢复');
+    ok('this hour', errorText('RATE_LIMITED', { window: 'hour' }, 429, en) === en.rateHour);
+    ok('older service: the plain sentence', errorText('RATE_LIMITED', { retry_after: 30 }, 429, en) === en.errors.RATE_LIMITED);
+    ok('space full: when room frees up', errorText('QUOTA_EXCEEDED', { field: 'bytes', frees_in: 7200 }, 507, en) === 'Storage is full — the oldest item expires in about 2 hours and frees up room');
+    ok('queue full, zh: when room frees up', errorText('QUOTA_EXCEEDED', { field: 'items', frees_in: 90000 }, 507, zh) === '积压的内容太多了，最早的一条约 25 小时后到期，到时自动腾出位置');
+    ok('space full without a time: the plain sentence', errorText('QUOTA_EXCEEDED', { field: 'bytes' }, 507, en) === en.quotaBytes);
+    ok('a code with no special case: the table, then HTTP', errorText('INVALID_TOKEN', {}, 401, en) === en.errors.INVALID_TOKEN && errorText('NOPE', {}, 502, en) === en.httpFailed(502));
+    const err = apiError(429, { error: 'RATE_LIMITED', window: 'day', retry_after: 90, upgrade_url: 'https://x.test/up', why: 'per_day' });
+    ok('an ApiError keeps the code, the status and the whole answer', err.code === 'RATE_LIMITED' && err.status === 429 && err.data.upgrade_url === 'https://x.test/up' && /used up/.test(err.message));
+    for (const why of ['per_day', 'queue', 'space', 'file_size', 'devices', 'realtime', 'uploads', 'downloads', 'kept']) {
+      ok(`an upgrade line for why=${why}, both languages`, en.upgradeFor(why) !== en.upgradeFor('?') && zh.upgradeFor(why) !== zh.upgradeFor('?'));
+    }
+    // the Notice: the sentence alone, or the sentence and a link one click away
+    errorNotice('dropit: Sending too fast', { data: {} });
+    ok('no link from the service: a plain Notice', typeof lastNotice.m === 'string' && lastNotice.m === 'dropit: Sending too fast', JSON.stringify(lastNotice));
+    errorNotice('dropit: Sending too fast', { data: { upgrade_url: 'javascript:alert(1)', why: 'per_day' } });
+    ok('a link that is not one to open: a plain Notice, nothing to click', typeof lastNotice.m === 'string', JSON.stringify(lastNotice));
+    errorNotice('dropit: Sending too fast', err);
+    ok('a link from the service: the sentence and the way past it, and it stays long enough to click', lastNotice.m.text[0] === 'dropit: Sending too fast'
+      && lastNotice.m.links[0].text === en.upgradeFor('per_day') && lastNotice.m.links[0].href === 'https://x.test/up' && lastNotice.ms >= 12_000, JSON.stringify([lastNotice.m.text, lastNotice.m.links, lastNotice.ms]));
   }
 
   console.log(`\n${fail === 0 ? '✅' : '🛑'}  ${pass} passed, ${fail} failed\n`);

@@ -1,7 +1,7 @@
 {
   "id": "dropit",
   "name": "dropit (sync and send anything to phone and PC)",
-  "version": "3.1.2",
+  "version": "3.2.0",
   "minAppVersion": "1.5.7",
   "description": "Send, sync and transfer anything between your phone, browser, PC and vault: links, text, images, videos and files arrive as notes in seconds. Capture on the go into one inbox.",
   "author": "smart-kits",
