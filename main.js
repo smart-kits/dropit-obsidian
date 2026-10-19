@@ -534,6 +534,7 @@ const STRINGS = {
     addDevice: 'Add a device',
     generate: 'Generate a pairing code',
     codeValid: (min) => `Valid for ${min} min · copied`,
+    codeInstall: ['Not installed on the new device yet? Scan the QR code with it, or open ', ' to install, then enter these 6 characters.'],
     codeExpired: 'Expired — generate a new one',
     deviceJoined: 'dropit: a new device joined',
     thisDevice: 'this device',
@@ -825,6 +826,7 @@ const STRINGS = {
     addDevice: '添加设备',
     generate: '生成配对码',
     codeValid: (min) => `${min} 分钟内有效 · 已复制`,
+    codeInstall: ['新设备还没装 dropit？用它扫上面的二维码，或打开 ', ' 去安装，装好后输入这 6 位。'],
     codeExpired: '已过期，请重新生成',
     deviceJoined: 'dropit：新设备已加入',
     thisDevice: '本机',
@@ -3641,6 +3643,12 @@ class DropitSettingTab extends PluginSettingTab {
     const side = box.createDiv();
     side.createDiv({ cls: 'dropit-code', text: code });      // exactly what to type: no dash to skip over
     const hint = side.createDiv({ cls: 'setting-item-description' });
+    // Where the new device gets dropit, said next to the code it will need: a link that opens here, so nothing has to be typed
+    const install = side.createDiv({ cls: 'setting-item-description' });
+    install.appendText(t.codeInstall[0]);
+    const installLink = install.createEl('a', { text: 'dropit.smart-kits.xyz', href: INSTALL_URL });
+    installLink.addEventListener('click', (e) => { e.preventDefault(); window.open(INSTALL_URL); });
+    install.appendText(t.codeInstall[1]);
     let ticks = 0;
     const tick = async () => {
       const left = expires_at - Date.now();
