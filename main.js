@@ -93,10 +93,14 @@ function modeFor(handler, item) {
 function agentEnv(binPath, base, full = false) {
   const dir = binPath.includes('/') ? binPath.slice(0, binPath.lastIndexOf('/')) : '';
   if (full) {
-    // Open mode: everything the person's own session has (their PATH, their keys), plus the agent's own folder first
+    // Open mode: everything the person's own session has (their PATH, their keys), plus the agent's own folder first.
+    // An app started from the Dock has only /usr/bin:/bin:/usr/sbin:/sbin, without the places tools are usually installed
+    // (Homebrew, ~/.local/bin): those come last, so nothing the person has on their PATH is shadowed
     const env = {};
     for (const [k, v] of Object.entries(base || {})) if (typeof v === 'string') env[k] = v;
-    env.PATH = [dir, env.PATH, '/usr/bin', '/bin'].filter(Boolean).join(':');
+    const home = env.HOME || '';
+    const dirs = [dir, ...String(env.PATH || '').split(':'), '/opt/homebrew/bin', '/usr/local/bin', home && `${home}/.local/bin`, '/usr/bin', '/bin'];
+    env.PATH = [...new Set(dirs.filter(Boolean))].join(':');
     return env;
   }
   const env = { PATH: `${dir ? dir + ':' : ''}/usr/bin:/bin` };
