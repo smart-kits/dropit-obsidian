@@ -1529,8 +1529,26 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     for (const c of VECTORS.env) ok(`runner env: ${c.name}`, same(X.agentEnv(c.bin, c.base), c.expect));
     for (const c of VECTORS.fileNames) ok(`runner file name: ${JSON.stringify(c.input).slice(0, 30)}`, X.safeFileName(c.input) === c.expect);
     for (const c of VECTORS.linkHost) ok(`runner link host: ${c.input}`, X.linkHost(c.input) === c.expect);
-    ok('claude is the only agent with checked settings', Object.keys(X.RUN_AGENTS.claude.modes).join() === 'think,files,web'
+    ok('claude is the only agent with checked settings', Object.keys(X.RUN_AGENTS.claude.modes).join() === 'think,files,web,open'
       && ['codex', 'grok', 'gemini', 'pi'].every((id) => Object.keys(X.RUN_AGENTS[id].modes).length === 0 && X.RUN_AGENTS[id].verified === null));
+    // Full access: only a rule that asks for it gets it, it survives saving and upgrading, and a changed agent or command drops it
+    ok('open mode: the rule keeps it through cleaning and upgrading', X.upgradeRule(X.cleanRule({ id: 'r1', name: 'a', agent: 'claude', mode: 'open', kinds: ['text'] })).mode === 'open');
+    ok('open mode: a made-up mode becomes auto', X.cleanRule({ id: 'r1', name: 'a', agent: 'claude', mode: 'sudo', kinds: ['text'] }).mode === 'auto');
+    ok('open mode: picking another agent starts from auto again', (() => { const r = { mode: 'open', agent: 'claude' }; X.pickAgent(r, 'claude', []); return r.mode === 'auto'; })());
+    ok('open mode: a typed command is a command of the person\'s own, not open', (() => { const r = { mode: 'open', agent: 'claude' }; X.applyCommand(r, 'claude', 'mytool -x', 'claude -p', []); return r.agent === 'custom' && r.mode === 'auto'; })());
+    ok('open mode: the command line shown is the one that runs', X.commandLine('claude', null, 'open') === 'claude -p --no-session-persistence');
+    ok('open mode: the preview lists the environment by name only', (() => { const pv = X.previewOf({ id: 'r', name: 'a', enabled: true, auto: true, agent: 'claude', mode: 'open', kinds: ['text'], prompt: 'x' }, 'text', { base: { MY_KEY: 'secret' } }); return pv.env.MY_KEY === '…' && !JSON.stringify(pv.env).includes('secret'); })());
+    // The link line learned about sites that need a login and about posts that can be read another way: a rule that still has 3.2.0's default gets today's
+    for (const l of ['en', 'zh']) {
+      const oldLink = l === 'en'
+        ? '- Link: open the page and read it; say in one sentence what it is about, then give 3 to 5 key points and its conclusion or what is worth noting; list anything it asks you to do; if you cannot open it, say so instead of guessing from the address.'
+        : '- 链接：打开页面读正文，用一句话说它讲什么，再列 3 到 5 个要点，写出它的结论或值得注意之处；页面里有需要去做的事也列出；打不开就直接说打不开，不要根据网址猜。';
+      const parts = ['sum', 'link'];
+      const fresh = X.composePrompt(parts, l);
+      const prev = fresh.replace(fresh.split('\n').find((x) => x.startsWith(l === 'en' ? '- Link' : '- 链接')), oldLink);
+      ok(`the link line: a 3.2.0 default prompt (${l}) becomes today's`, prev !== fresh && (() => { const up = X.upgradeRule({ agent: 'claude', mode: 'auto', parts, prompt: prev }).prompt; return up !== prev && up.includes('api.fxtwitter.com'); })());   // written in the language the plugin is in now, as every earlier upgrade was
+      ok(`the link line: a prompt the person edited (${l}) is left alone`, X.upgradeRule({ agent: 'claude', mode: 'auto', parts, prompt: prev + ' mine' }).prompt === prev + ' mine');
+    }
     ok('the agents looked for are the five, in this order', Object.keys(X.RUN_AGENTS).join() === 'claude,codex,grok,gemini,pi');
     ok('the words of the rule and the document: the same as in the command line tool', X.composePrompt(['sum', 'ocr'], 'en').split('\n').length === 4
       && same(X.kindsFor(['ocr']), ['image', 'file']) && X.modeFor({}, { kind: 'url' }) === 'web'

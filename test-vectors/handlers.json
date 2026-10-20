@@ -660,6 +660,176 @@
         "run": false,
         "why": "skipped:no-files"
       }
+    },
+    {
+      "name": "open mode: a text, nothing added and nothing taken away",
+      "handler": {
+        "enabled": true,
+        "kinds": [
+          "text",
+          "url",
+          "image",
+          "video",
+          "file"
+        ],
+        "agent": "claude",
+        "mode": "open",
+        "prompt": "P"
+      },
+      "item": {
+        "kind": "text",
+        "text": "hello"
+      },
+      "expect": {
+        "run": true,
+        "bin": "claude",
+        "argv": [
+          "-p",
+          "--no-session-persistence"
+        ],
+        "agent": "claude",
+        "mode": "open"
+      }
+    },
+    {
+      "name": "open mode: a link needs no site named",
+      "handler": {
+        "enabled": true,
+        "kinds": [
+          "text",
+          "url",
+          "image",
+          "video",
+          "file"
+        ],
+        "agent": "claude",
+        "mode": "open",
+        "prompt": "P"
+      },
+      "item": {
+        "kind": "url",
+        "text": "https://v.douyin.com/gS9N9f3ZlDk/"
+      },
+      "expect": {
+        "run": true,
+        "bin": "claude",
+        "argv": [
+          "-p",
+          "--no-session-persistence"
+        ],
+        "agent": "claude",
+        "mode": "open"
+      }
+    },
+    {
+      "name": "open mode: a file is handed over like in files mode",
+      "handler": {
+        "enabled": true,
+        "kinds": [
+          "text",
+          "url",
+          "image",
+          "video",
+          "file"
+        ],
+        "agent": "claude",
+        "mode": "open",
+        "prompt": "P"
+      },
+      "item": {
+        "kind": "file",
+        "text": "",
+        "files": [
+          "a.pdf"
+        ]
+      },
+      "expect": {
+        "run": true,
+        "bin": "claude",
+        "argv": [
+          "-p",
+          "--no-session-persistence"
+        ],
+        "agent": "claude",
+        "mode": "open"
+      }
+    },
+    {
+      "name": "open mode: a file that was not handed over is not run",
+      "handler": {
+        "enabled": true,
+        "kinds": [
+          "text",
+          "url",
+          "image",
+          "video",
+          "file"
+        ],
+        "agent": "claude",
+        "mode": "open",
+        "prompt": "P"
+      },
+      "item": {
+        "kind": "image",
+        "text": ""
+      },
+      "expect": {
+        "run": false,
+        "why": "skipped:no-files"
+      }
+    },
+    {
+      "name": "open mode: auto never picks it (a rule without a mode)",
+      "handler": {
+        "enabled": true,
+        "kinds": [
+          "text"
+        ],
+        "agent": "claude",
+        "prompt": "P"
+      },
+      "item": {
+        "kind": "text",
+        "text": "hello"
+      },
+      "expect": {
+        "run": true,
+        "bin": "claude",
+        "argv": [
+          "-p",
+          "--safe-mode",
+          "--tools",
+          "",
+          "--strict-mcp-config",
+          "--no-session-persistence"
+        ],
+        "agent": "claude",
+        "mode": "think"
+      }
+    },
+    {
+      "name": "open mode: an agent with nothing checked has none",
+      "handler": {
+        "enabled": true,
+        "kinds": [
+          "text",
+          "url",
+          "image",
+          "video",
+          "file"
+        ],
+        "agent": "codex",
+        "mode": "open",
+        "prompt": "P"
+      },
+      "item": {
+        "kind": "text",
+        "text": "hello"
+      },
+      "expect": {
+        "run": false,
+        "why": "skipped:unsupported-mode"
+      }
     }
   ],
   "compose": [

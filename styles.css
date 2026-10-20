@@ -132,9 +132,22 @@
 
 .dropit-checks {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--size-4-2);
+}
+
+/* One row of boxes behind a small fixed-width label, so the rows start at the same place */
+.dropit-checks-row {
+  display: flex;
   flex-wrap: wrap;
-  justify-content: flex-start;
+  align-items: center;
   gap: var(--size-4-2) var(--size-4-5);
+}
+
+.dropit-checks-label {
+  min-width: 3.5em;
+  color: var(--text-muted);
 }
 
 .dropit-check {
@@ -252,12 +265,6 @@
   width: 11em;
 }
 
-/* "Keep the original note" ends the row of what to handle, set apart from the kinds */
-.dropit-check-keep {
-  margin-left: var(--size-4-3);
-  padding-left: var(--size-4-3);
-  border-left: 1px solid var(--background-modifier-border);
-}
 
 .dropit-reset {
   margin-left: var(--size-4-3);

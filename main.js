@@ -42,6 +42,7 @@ const RUN_KINDS = ['text', 'url', 'image', 'video', 'file'];
  * Claude Code: checked on 2.1.301 with the person's own settings left on (their default permission mode there
  * lets a read tool read anywhere, which is why files and web name `--permission-mode dontAsk` out loud), and
  * with `--safe-mode`, which keeps the person's own instructions, memory, hooks and plugins out of the run.
+ * `open` is the exception: it adds no flag of its own, so it was not checked for what it blocks — nothing is meant to be blocked.
  * Codex CLI, Gemini CLI, Ollama: found when installed, but no mode is offered until it has been checked.
  */
 const RUN_AGENTS = {
@@ -57,6 +58,9 @@ const RUN_AGENTS = {
       // One site: the one the link points to, or the one the person named. A link that redirects elsewhere is not checked
       web: (domain) => ['-p', '--safe-mode', '--permission-mode', 'dontAsk', '--tools', 'WebFetch',
         '--allowedTools', `WebFetch(domain:${domain})`, '--strict-mcp-config', '--no-session-persistence'],
+      // Nothing added and nothing taken away: the person's own Claude Code settings decide what it may use (their skills, MCP
+      // servers, hooks, instructions, allow and deny rules), and it starts with their whole environment. Only ever chosen by the person
+      open: () => ['-p', '--no-session-persistence'],
     },
   },
   // The rest are found, and offered as a starting point for the person's own command: the arguments in `suggest` come
@@ -75,18 +79,26 @@ function suggestArgv(id, binPath) {
 
 /**
  * What an item needs from an agent, decided here and not by the rule: a text gets no tool, a link gets the one site it
- * points to, a file gets only its own copy. A rule can still name a mode of its own ('think' | 'files' | 'web').
+ * points to, a file gets only its own copy. A rule can still name a mode of its own ('think' | 'files' | 'web' | 'open');
+ * 'open' is never picked here: it hands the agent everything the person's own setup allows, so only the person asks for it.
  */
 function modeFor(handler, item) {
   const m = handler && handler.mode;
-  if (m === 'think' || m === 'files' || m === 'web') return m;
+  if (m === 'think' || m === 'files' || m === 'web' || m === 'open') return m;
   const kind = RUN_KINDS.includes(item.kind) ? item.kind : 'file';
   return kind === 'url' ? 'web' : kind === 'text' ? 'think' : 'files';
 }
 
 /** The environment an agent is started with: where it lives, and who is asking (its login lives in the keychain) */
-function agentEnv(binPath, base) {
+function agentEnv(binPath, base, full = false) {
   const dir = binPath.includes('/') ? binPath.slice(0, binPath.lastIndexOf('/')) : '';
+  if (full) {
+    // Open mode: everything the person's own session has (their PATH, their keys), plus the agent's own folder first
+    const env = {};
+    for (const [k, v] of Object.entries(base || {})) if (typeof v === 'string') env[k] = v;
+    env.PATH = [dir, env.PATH, '/usr/bin', '/bin'].filter(Boolean).join(':');
+    return env;
+  }
   const env = { PATH: `${dir ? dir + ':' : ''}/usr/bin:/bin` };
   const user = base.USER || base.LOGNAME;
   if (user) env.USER = user;
@@ -143,7 +155,8 @@ function planRun(handler, item) {
     if (!domain || !/^[a-z0-9.-]+$/i.test(domain)) return { run: false, why: 'skipped:no-domain' };
     return { run: true, argv: [...build(domain), ...modelArgs(agent, handler)], bin: agent.bin, agent: handler.agent, mode, domain };
   }
-  if (mode === 'files' && !(item.files && item.files.length)) return { run: false, why: 'skipped:no-files' };
+  const needsFiles = mode === 'files' || (mode === 'open' && kind !== 'text' && kind !== 'url');
+  if (needsFiles && !(item.files && item.files.length)) return { run: false, why: 'skipped:no-files' };
   return { run: true, argv: [...build(), ...modelArgs(agent, handler)], bin: agent.bin, agent: handler.agent, mode };
 }
 
@@ -210,7 +223,7 @@ function sanitizeAnswer(text, max = RUN_DEFAULTS.maxAnswerChars) {
 const PROMPT_PARTS = {
   ocr: { kinds: ['image', 'file'], en: '- Image or PDF: first copy out the text in it exactly, then say in one sentence what it is; for a receipt, ticket, business card or ID, list the key facts (who, amount, date, contact); list anything to do and any time mentioned. For a long PDF give only the title, the main points and the key facts, not all of it.', zh: '- 图片或 PDF：先把里面的文字原样抄出来，再用一句话说明这是什么；是收据、票据、名片、证件这类，列出关键信息（商家或姓名、金额、日期、联系方式）；里面有要做的事或提到的时间，另列出来。很长的 PDF 只写标题、要点和关键信息，不整篇转录。' },
   audio: { kinds: ['video', 'file'], en: '- Audio or video: transcribe it, keeping the words as spoken and dropping only obvious filler, with "[inaudible]" where you cannot hear; then give up to 3 points, and list anything to do with the time mentioned; for a video without speech, describe it in one sentence.', zh: '- 音频或视频：转写成文字，保持原话，只去掉明显的口头赘词，听不清的写「[听不清]」；然后用 3 点以内概括，并列出需要去做的事和提到的时间；没有人声的视频，用一句话说画面。' },
-  link: { kinds: ['url'], en: '- Link: open the page and read it; say in one sentence what it is about, then give 3 to 5 key points and its conclusion or what is worth noting; list anything it asks you to do; if you cannot open it, say so instead of guessing from the address.', zh: '- 链接：打开页面读正文，用一句话说它讲什么，再列 3 到 5 个要点，写出它的结论或值得注意之处；页面里有需要去做的事也列出；打不开就直接说打不开，不要根据网址猜。' },
+  link: { kinds: ['url'], en: '- Link: open the page and read it; say in one sentence what it is about, then give 3 to 5 key points and its conclusion or what is worth noting; list anything it asks you to do. For a post on x.com or twitter.com, if you can reach it, read api.fxtwitter.com/<user>/status/<id> instead (JSON, no login); for bilibili, api.bilibili.com/x/web-interface/view?bvid=<BV id> gives only the title, uploader and length, not what is said. If the page is empty (it needs a login or scripts, as Douyin, WeChat Channels and Xiaohongshu do) or you cannot open it, say so, and give only the title and author the share text itself shows; never guess from the address.', zh: '- 链接：打开页面读正文，用一句话说它讲什么，再列 3 到 5 个要点，写出它的结论或值得注意之处；页面里有需要去做的事也列出。x.com 或 twitter.com 的推文，如果能联网，改读 api.fxtwitter.com/<用户名>/status/<编号>（返回 JSON，不用登录）；bilibili 的 api.bilibili.com/x/web-interface/view?bvid=<BV 号> 只能得到标题、作者和时长，读不到视频里说了什么。页面是空的（要登录或靠脚本渲染，比如抖音、视频号、小红书）或打不开时，直说读不到，只转述分享文字里本身有的标题和作者，不要根据网址猜。' },
   sum: { kinds: ['text'], en: '- Text: say what it is about in one sentence; list what needs doing, one sentence each, with any time mentioned; list dates, amounts and contact details exactly as written; if it is an idea or a question, add one sentence on the most important point; leave out whatever is not there.', zh: '- 文字：用一句话概括；把需要去做的事逐条列出，每条一句话，带上提到的时间；日期、金额、联系方式照原样列出；是想法或问题的，再用一句话点出最关键的一点；里面没有的就不写。' },
 };
 const PROMPT_ORDER = ['ocr', 'audio', 'link', 'sum'];
@@ -295,7 +308,7 @@ async function runHandler(deps, handler, item, files = [], binPath = null) {
   try {
     dir = await fsx.promises.mkdtemp(pathx.join(osx.tmpdir(), 'dropit-run-'));
     const names = [];
-    if (plan.mode === 'files') {
+    if (plan.mode === 'files' || plan.mode === 'open') {
       for (const f of files) {
         if (f.data.length > maxFile) return { ok: false, why: 'skipped:file-too-big' };
         let name = safeFileName(f.name);
@@ -311,7 +324,7 @@ async function runHandler(deps, handler, item, files = [], binPath = null) {
       const finish = (r) => { if (done) return; done = true; clearTimeout(timer); resolve(r); };
       let child;
       try {
-        child = spawn(bin, plan.argv, { cwd: dir, env: agentEnv(bin, env), shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+        child = spawn(bin, plan.argv, { cwd: dir, env: agentEnv(bin, env, plan.mode === 'open'), shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
       } catch (e) { return finish({ ok: false, why: 'agent-missing', detail: String(e.message || e) }); }
       timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone already */ } finish({ ok: false, why: 'timeout' }); }, timeoutMs);
       child.stdout.on('data', (d) => { if (out.length < RUN_DEFAULTS.maxAnswerChars * 4) out += d; });
@@ -578,10 +591,13 @@ const STRINGS = {
       reset: 'Reset',
       handle: 'Handle',
       handleOpts: { sum: 'Text', link: 'Links', ocr: 'Images & PDFs', audio: 'Audio & video' },
+      handleRows: { kinds: 'Types', options: 'Options' },
       handleTip: 'Text is tidied and summarised, a link is read and summarised, text is copied out of images and PDFs, audio and video are transcribed. Each box writes its line of the prompt.',
       prompt: 'Prompt',
       promptTip: '{{kind}} is the only variable: other {{…}} are dropped, because titles, file names and text are written by whoever sent them.',
       keepOriginal: 'Keep the original note',
+      fullAccess: 'Don’t limit the agent',
+      fullAccessTip: 'Advanced. Off (default): a text gets no tools, a link can open its one site, a file can read its own copy. On: the agent may use everything your own Claude Code allows — going online, reading and writing files, running commands, skills, MCP servers — and dropit adds no limit. Read the warning first.',
       keepOriginalTip: 'On: the note stays as received and the result goes into a new note beside it. Off: a received text or link becomes one note — what arrived (quoted), then the result. A file is always kept, with the result beside it.',
       tryButton: 'Try it',
       tryTip: 'Runs it once on the latest item you received, so you can see what comes out. Asks first.',
@@ -606,12 +622,17 @@ const STRINGS = {
       noteClaude: 'Permissions are set per item: a text gets no tools, a link can open its one site, a file can read only its own copy.',
       failedAuto: (seq, why) => `dropit: couldn’t process #${seq} — ${why}`,
       kinds: { text: 'Text', url: 'Links', image: 'Images', video: 'Videos', file: 'Files' },
-      modes: { think: 'Read the text only', files: 'Read this item’s files', web: 'Go online' },
+      modes: { think: 'Read the text only', files: 'Read this item’s files', web: 'Go online', open: 'No limits' },
+      fullAccessAsk: 'No limits on the agent: dropit adds none. Claude Code runs with your own settings (skills, MCP servers, hooks, allow and deny rules) and your whole environment, on everything this rule receives. Anyone holding a send-only key for your account can then steer it through what they send. To limit it, add rules to your Claude Code settings or change the command (see the README, “No limits on the agent”). Turn it on?',
+      fullAccessYes: 'Turn on',
+      guideLink: 'Guide: let the agent read videos and more ↗',
+      promptHint: 'The prompt is what you tell the agent. To have it read videos or use your own tools, see the guide.',
       modeDesc: {
         think: 'The agent has no tools. It can only read what it is given and answer in text.',
         files: 'The agent may read this item’s files, copied into an empty temporary folder. Nothing else.',
         web: 'The agent may open one website: the one a link points to, or the one you name below. A link that redirects elsewhere is not checked. This is the riskiest setting.',
         custom: 'Your own command. dropit only hands it the text; what it can do is up to you.',
+        open: 'dropit adds no limit. The agent uses everything your own Claude Code setup allows, with your whole environment. Anyone holding a send-only key for your account can steer it through what they send.',
       },
       agentCustom: 'Custom command',
       fPrompt: 'Prompt',
@@ -655,6 +676,7 @@ const STRINGS = {
       pvCommand: 'Command (an array: no shell, and the content never appears in it)',
       pvInput: 'Sent to the agent’s standard input',
       pvEnv: 'Environment',
+      pvMore: 'The command can be changed in the box above; a changed command runs exactly as written. To have the agent read videos or use your own tools and keys, see the guide.',
       pvCwd: 'Working directory: an empty temporary folder',
       pvPaused: 'Not run: auto-processing is paused.',
       pvOff: 'Not run by itself: this rule is off.',
@@ -870,10 +892,13 @@ const STRINGS = {
       reset: '恢复默认',
       handle: '处理',
       handleOpts: { sum: '文字', link: '链接', ocr: '图片和 PDF', audio: '语音和视频' },
+      handleRows: { kinds: '类型', options: '选项' },
       handleTip: '文字整理并总结，链接读取并总结，图片和 PDF 提取文字，语音和视频转写。每个勾选对应提示词里的一行。',
       prompt: '提示词',
       promptTip: '只有 {{kind}} 这一个变量有意义：其它 {{…}} 会被丢弃，因为标题、文件名和正文都是发送者写的。',
       keepOriginal: '保留原笔记',
+      fullAccess: '不限制 agent',
+      fullAccessTip: '高级选项。关（默认）：文字没有工具，链接只能打开它指向的网站，文件只能读自己的副本。开：agent 可以使用你自己的 Claude Code 允许的一切——联网、读写文件、运行命令、技能、MCP 服务——dropit 不加任何限制。先读警告。',
       keepOriginalTip: '开：收到的笔记保持原样，结果写成旁边的新笔记。关：收到的文字或链接变成一条笔记——先引用收到的内容，再写结果。文件始终保留，结果写在旁边。',
       tryButton: '试一下',
       tryTip: '拿收到的最新一条跑一次，看结果长什么样。跑之前会先确认。',
@@ -898,12 +923,17 @@ const STRINGS = {
       noteClaude: '权限按每条内容分别给：文字没有任何工具，链接只能打开它指向的那一个网站，文件只能读它自己的副本。',
       failedAuto: (seq, why) => `dropit：没能处理 #${seq} —— ${why}`,
       kinds: { text: '文字', url: '链接', image: '图片', video: '视频', file: '文件' },
-      modes: { think: '只读文字', files: '读这条内容的文件', web: '联网' },
+      modes: { think: '只读文字', files: '读这条内容的文件', web: '联网', open: '不限制' },
+      fullAccessAsk: '不限制 agent：dropit 不加任何限制。Claude Code 按你自己的设置运行（技能、MCP 服务、hooks、允许和拒绝规则），带着你的全部环境变量，处理这条规则收到的所有内容。持有你账号「只投递」密钥的人，可以通过他们发来的内容间接指挥它。要加限制，在 Claude Code 的设置里加规则，或改命令（见 README「不限制 agent」一节）。确定打开吗？',
+      fullAccessYes: '打开',
+      guideLink: '指南：让 agent 读视频，以及更多 ↗',
+      promptHint: '提示词是你对 agent 说的话。想让它读视频、用你自己的工具，见指南。',
       modeDesc: {
         think: 'agent 没有任何工具，只能读到给它的文字，只能回一段文字。',
         files: 'agent 可以读这条内容的文件，文件复制进一个空的临时目录。除此之外什么都不行。',
         web: 'agent 可以打开一个网站：链接指向的那个，或下面填的那个。链接跳转到别处的不做检查。这是风险最高的一档。',
         custom: '你自己的命令。dropit 只把文字交给它，它能做什么由你自己负责。',
+        open: 'dropit 不加任何限制。agent 能用你自己的 Claude Code 设置允许的一切，并带着你的全部环境变量。持有你账号「只投递」密钥的人，可以通过他们发来的内容间接指挥它。',
       },
       agentCustom: '自定义命令',
       fPrompt: '提示词',
@@ -947,6 +977,7 @@ const STRINGS = {
       pvCommand: '命令（数组：不经过 shell，内容不会出现在里面）',
       pvInput: '发到 agent 标准输入的内容',
       pvEnv: '环境',
+      pvMore: '这条命令可以在上面的框里直接改，改过的命令按原样运行。想让 agent 读视频、用你自己的工具或密钥，见指南。',
       pvCwd: '工作目录：一个空的临时目录',
       pvPaused: '不会运行：自动处理已暂停。',
       pvOff: '不会自动运行：这条规则是关着的。',
@@ -1609,7 +1640,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       bin = await this.agentPath(rule.agent);
       if (!bin) return { ok: false, why: 'agent-missing' };
     }
-    const files = plan.mode === 'files' ? await this.readFiles(payload.files, handler) : [];
+    const files = plan.mode === 'files' || plan.mode === 'open' ? await this.readFiles(payload.files, handler) : [];
     if (!files) return { ok: false, why: 'skipped:file-too-big' };
     this.lastRun = { id: rule.id, payload };
     // Once a session on its own, every time by hand: the first sign that something started
@@ -2723,7 +2754,7 @@ function ago(ms) {
 const isDesktop = () => !!Platform?.isDesktopApp;
 const AGENT_LOG_KEEP = 50;
 const FAIL_NOTICE_MS = 60_000;
-const AGENT_MODES = ['auto', 'think', 'files', 'web'];
+const AGENT_MODES = ['auto', 'think', 'files', 'web', 'open'];
 
 let nodeLib = null;
 /** fs, path, child_process — loaded on first use, desktop only. */
@@ -2772,6 +2803,7 @@ function setParts(rule, parts) {
 /** Choose the command from the list: a checked agent as itself, any other as a command of the person's own */
 function pickAgent(rule, pick, found) {
   rule.pick = pick;
+  rule.mode = 'auto';                    // another agent starts from the safe default: no-limits is asked for again
   if (pick !== 'custom' && RUN_AGENTS[pick] && Object.keys(RUN_AGENTS[pick].modes).length) { rule.agent = pick; delete rule.argv; return; }
   rule.agent = 'custom';
   if (pick !== 'custom') rule.argv = suggestArgv(pick, found.find((x) => x.id === pick)?.path);
@@ -2804,10 +2836,10 @@ function splitCommand(text) {
 const ORDER_UI = ['sum', 'link', 'ocr', 'audio'];
 
 /** The command an agent starts from, as one line: the checked one for Claude, the suggestion for the rest, nothing for a command of one's own */
-function commandLine(pick, binPath) {
+function commandLine(pick, binPath, mode = 'think') {
   const a = RUN_AGENTS[pick];
   if (!a) return '';
-  if (a.verified) return joinCommand([a.bin, ...a.modes.think()]);    // the program by name: where it lives is looked up when it runs
+  if (a.verified) return joinCommand([a.bin, ...(a.modes[mode] ?? a.modes.think)()]);    // the program by name: where it lives is looked up when it runs
   return joinCommand(suggestArgv(pick, binPath));
 }
 
@@ -2821,22 +2853,34 @@ function toggleHandle(rule, id, on) {
  * anything else is the person's own command, run exactly as written.
  */
 function applyCommand(rule, pick, text, defaultLine, found) {
-  if (RUN_AGENTS[pick]?.verified && text.trim() === defaultLine) pickAgent(rule, pick, found);
-  else { rule.agent = 'custom'; rule.argv = splitCommand(text); }
+  if (RUN_AGENTS[pick]?.verified && text.trim() === defaultLine) { const mode = rule.mode; pickAgent(rule, pick, found); rule.mode = mode; }
+  else { rule.agent = 'custom'; rule.argv = splitCommand(text); rule.mode = 'auto'; }
 }
 
 /** The page that lists what to install, straight to its list (the home page is not that) */
 const INSTALL_URL = `${DEFAULT_ENDPOINT}/#install`;
 
+/** The guide for people who want the agent to read videos or use their own tools: only ever linked from a place the person went to on purpose */
+const GUIDE_URL = {
+  en: 'https://github.com/smart-kits/dropit-client/blob/main/docs/ai-videos.md',
+  zh: 'https://github.com/smart-kits/dropit-client/blob/main/docs/ai-videos.zh-CN.md',
+};
+/** A link to the guide inside `parent`; clicking opens it in the browser */
+function guideLink(parent) {
+  const a = parent?.createEl?.('a', { text: t.agents.guideLink, href: GUIDE_URL[lang] ?? GUIDE_URL.en });
+  a?.addEventListener?.('click', (e) => { e.preventDefault(); window.open(GUIDE_URL[lang] ?? GUIDE_URL.en); });
+  return a;
+}
+
 /** What the command box shows for a rule */
 function shownCommand(rule, pick, binPath) {
-  return rule.agent !== 'custom' ? commandLine(pick, binPath) : joinCommand(rule.argv ?? []);
+  return rule.agent !== 'custom' ? commandLine(pick, binPath, rule.mode) : joinCommand(rule.argv ?? []);
 }
 
 /** Is the command no longer the default one (so there is something to go back to)? */
 function isEdited(rule, pick, binPath) {
   if (rule.agent !== 'custom' || !RUN_AGENTS[pick]) return false;
-  return joinCommand(rule.argv ?? []) !== commandLine(pick, binPath);
+  return joinCommand(rule.argv ?? []) !== commandLine(pick, binPath, rule.mode);
 }
 
 /** A rule as it is kept: only the known fields, each of a usable type. Optional numbers are left out when empty. */
@@ -2914,8 +2958,14 @@ const LEGACY_FRAME = {
   zh: ['你收到一条从另一台设备发来的内容。先判断它是什么，再按类型处理：', '只输出结果，不要寒暄。'],
 };
 const LEGACY_PROMPT_START = '先判断这条内容是什么（文章、截图、待办、联系方式、收据……）';
+/** The link line of 3.2.0, before it learned which pages need a login and which posts can be read another way */
+const PREV_LINK = {
+  en: '- Link: open the page and read it; say in one sentence what it is about, then give 3 to 5 key points and its conclusion or what is worth noting; list anything it asks you to do; if you cannot open it, say so instead of guessing from the address.',
+  zh: '- 链接：打开页面读正文，用一句话说它讲什么，再列 3 到 5 个要点，写出它的结论或值得注意之处；页面里有需要去做的事也列出；打不开就直接说打不开，不要根据网址猜。',
+};
 function isLegacyPrompt(prompt, parts) {
   if (String(prompt).startsWith(LEGACY_PROMPT_START)) return true;
+  if ((parts || []).includes('link') && ['en', 'zh'].some((l) => prompt === composePrompt(parts, l).replace(PROMPT_PARTS.link[l], PREV_LINK[l]))) return true;
   return ['en', 'zh'].some((l) => prompt === [LEGACY_FRAME[l][0], ...PROMPT_ORDER.filter((k) => (parts || []).includes(k)).map((k) => LEGACY_PARTS[k][l]), LEGACY_FRAME[l][1]].join('\n'));
 }
 
@@ -2927,7 +2977,7 @@ function isLegacyPrompt(prompt, parts) {
 function upgradeRule(r) {
   if (!r) return r;
   if (isLegacyPrompt(r.prompt, r.parts)) r.prompt = composePrompt(r.parts, lang);
-  if (r.agent !== 'custom' && r.mode !== 'auto') { r.mode = 'auto'; delete r.webDomain; }
+  if (r.agent !== 'custom' && r.mode !== 'auto' && r.mode !== 'open') { r.mode = 'auto'; delete r.webDomain; }
   return r;
 }
 
@@ -2976,6 +3026,9 @@ function sampleItem(key, tt = t) {
   return { kind: 'text', text: a.sampleText };
 }
 
+/** The environment as shown on screen: open mode starts with the person's whole environment, which holds their keys, so only the names are listed */
+const shownEnv = (env, open) => (open ? Object.fromEntries(Object.keys(env).sort().map((k) => [k, '…'])) : env);
+
 /**
  * What a rule would do with an example item, without running anything: the verdict, the program and arguments, what
  * the agent would be sent, and the environment it would start in.
@@ -2995,11 +3048,11 @@ function previewOf(rule, sample, { paused = false, bin = null, base = {} } = {})
   const label = plan.agent === 'custom' ? rule.name : RUN_AGENTS[plan.agent].label;
   notes.push(a.pvRun(label, plan.agent === 'custom' ? a.agentCustom : a.modes[plan.mode]));
   if (!rule.auto) notes.push(a.pvManual);
-  if (plan.mode !== 'files' && item.kind !== 'text' && item.kind !== 'url') notes.push(a.pvMetaOnly);
-  if (plan.mode !== 'web' && item.kind === 'url') notes.push(a.pvNoWeb);
-  const names = plan.mode === 'files' ? (item.files ?? []).map((f) => safeFileName(f)) : [];
+  if (plan.mode !== 'files' && plan.mode !== 'open' && item.kind !== 'text' && item.kind !== 'url') notes.push(a.pvMetaOnly);
+  if (plan.mode !== 'web' && plan.mode !== 'open' && item.kind === 'url') notes.push(a.pvNoWeb);
+  const names = plan.mode === 'files' || plan.mode === 'open' ? (item.files ?? []).map((f) => safeFileName(f)) : [];
   const program = bin || plan.bin;
-  return { notes, plan, argv: [program, ...plan.argv], input: composeInput(rule, item, names), env: agentEnv(program, base) };
+  return { notes, plan, argv: [program, ...plan.argv], input: composeInput(rule, item, names), env: shownEnv(agentEnv(program, base, plan.mode === 'open'), plan.mode === 'open') };
 }
 
 /** The first example item this rule would start for — what the first-time confirmation shows */
@@ -3534,15 +3587,22 @@ class DropitSettingTab extends PluginSettingTab {
     const handle = new Setting(box).setName(u.handle);
     handle.settingEl.addClass?.('dropit-wide');
     this.tip(handle, u.handleTip);
+    // Two rows under one name, each with its own small label so the boxes line up: the types of content, then the options
     const checks = handle.controlEl?.createDiv?.({ cls: 'dropit-checks' });
+    const checkRow = (label) => {
+      const row = checks?.createDiv?.({ cls: 'dropit-checks-row' });
+      row?.createSpan?.({ cls: 'dropit-checks-label', text: label });
+      return row;
+    };
+    const kindsRow = checkRow(u.handleRows.kinds);
     let promptEl;
     let promptReset;
     const syncPrompt = () => {
       if (promptEl) promptEl.value = rule.prompt;
       promptReset?.toggle?.(rule.prompt !== composePrompt(rule.parts ?? [], lang));
     };
-    const checkbox = (label, checked, tipText, onChange, cls = '') => {
-      const lab = checks?.createEl?.('label', { cls: `dropit-check ${cls}`.trim() });
+    const checkbox = (label, checked, tipText, onChange, cls = '', into = kindsRow) => {
+      const lab = into?.createEl?.('label', { cls: `dropit-check ${cls}`.trim() });
       const input = lab?.createEl?.('input', { type: 'checkbox' });
       lab?.createSpan?.({ text: label });
       if (input) {
@@ -3558,8 +3618,18 @@ class DropitSettingTab extends PluginSettingTab {
         if (note) note.toggle(!rule.kinds.length);
       });
     }
-    // Not a kind of content but the same question of "what do I get": it sits at the end of the row, set apart
-    checkbox(u.keepOriginal, rule.keepSource === true, u.keepOriginalTip, (on) => { rule.keepSource = on; }, 'dropit-check-keep');
+    // Not types of content but what the result looks like and what the agent may do: a row of their own
+    const extras = checkRow(u.handleRows.options);
+    checkbox(u.keepOriginal, rule.keepSource === true, u.keepOriginalTip, (on) => { rule.keepSource = on; }, '', extras);
+    // Advanced and off by default: it takes every limit away, so turning it on asks once, with the warning in full
+    if (RUN_AGENTS[rule.agent]?.modes?.open) {
+      checkbox(u.fullAccess, rule.mode === 'open', u.fullAccessTip, (on) => {
+        if (!on) { rule.mode = 'auto'; return; }
+        rule.mode = 'auto';
+        new Confirm(p.app, t.agents.fullAccessAsk, t.agents.fullAccessYes, async () => { rule.mode = 'open'; await p.save(); this.display(); }, true).open();
+        setTimeout(() => { if (rule.mode !== 'open') this.display(); }, 0);
+      }, '', extras);
+    }
     const note = box.createDiv({ cls: 'dropit-hint', text: t.agents.needKinds });
     note.toggle(!rule.kinds.length);
 
@@ -3578,13 +3648,18 @@ class DropitSettingTab extends PluginSettingTab {
     promptEl = promptRow.createEl('textarea', { cls: 'dropit-prompt' });
     promptEl.rows = 9;
     promptEl.value = rule.prompt;
-    promptEl.addEventListener('input', async () => { rule.prompt = promptEl.value; await p.save(); syncPrompt(); });
+    // Only once the person starts writing in it: a line saying what the prompt is, and where the guide is
+    const promptHint = promptRow.createDiv({ cls: 'dropit-hint' });
+    promptHint.toggle(false);
+    promptHint.appendText?.(`${t.agents.promptHint} `);
+    guideLink(promptHint);
+    promptEl.addEventListener('input', async () => { rule.prompt = promptEl.value; promptHint.toggle(true); await p.save(); syncPrompt(); });
     syncPrompt();
 
     this.limits(box, rule);
 
     // The command: the default is written out, so what runs is never a surprise, and it can be changed on the spot — folded, because most people never need to
-    const defaultLine = commandLine(pick, path);
+    const defaultLine = commandLine(pick, path, rule.mode);
     let resetButton;
     const syncReset = () => resetButton?.buttonEl?.toggle?.(isEdited(rule, pick, path));
     const cmdRow = box.createEl('details', { cls: 'dropit-prompt-row' });
@@ -3815,6 +3890,10 @@ class CommandView extends Modal {
       .addDropdown((d) => d.addOptions(Object.fromEntries(Object.keys(a.samples).map((k) => [k, a.samples[k]]))).setValue(this.pv.sample).onChange((v) => { this.pv.sample = v; this.show(out); }));
     contentEl.appendChild(out);
     this.show(out);
+    // Only here, where the person went to see exactly what runs: how to change it, and where the guide is
+    const more = contentEl.createDiv({ cls: 'dropit-hint' });
+    more.appendText(`${a.pvMore} `);
+    guideLink(more);
   }
 
   async show(out) {
@@ -3863,13 +3942,14 @@ class CommandPicker extends FuzzySuggestModal {
 }
 
 class Confirm extends Modal {
-  constructor(app, message, yes, onYes) {
+  constructor(app, message, yes, onYes, withGuide = false) {
     super(app);
-    Object.assign(this, { message, yes, onYes });
+    Object.assign(this, { message, yes, onYes, withGuide });
   }
 
   onOpen() {
     this.contentEl.createEl('p', { text: this.message });
+    if (this.withGuide) guideLink(this.contentEl.createEl('p', { cls: 'dropit-hint' }));
     new Setting(this.contentEl)
       .addButton((b) => b.setButtonText(t.cancel).onClick(() => this.close()))
       .addButton((b) => b.setButtonText(this.yes).setWarning().onClick(() => { this.close(); this.onYes(); }));
@@ -3909,6 +3989,7 @@ class ConsentModal extends Modal {
     contentEl.createEl('p', { text: `${a.consentPerm}: ${mode}` });
     const list = contentEl.createEl('ul');
     for (const line of [a.consentJudge, a.consentResult, a.consentKey]) list.createEl('li', { text: line });
+    guideLink(contentEl.createEl('p', { cls: 'dropit-hint' }));
     new Setting(contentEl)
       .addButton((b) => b.setButtonText(t.cancel).onClick(() => this.close()))
       .addButton((b) => b.setButtonText(this.confirmText).setCta().onClick(async () => {
@@ -3955,7 +4036,7 @@ Object.assign(module.exports, {
   // the runner block
   RUNNER_VERSION, RUN_DEFAULTS, RUN_KINDS, RUN_AGENTS, agentEnv, safeFileName, linkHost, planRun, composeInput, sanitizeAnswer, detectAgents, runHandler,
   // the plugin's side of auto-processing
-  Platform, isDesktop, nodeDeps, newRule, setParts, pickAgent, toggleHandle, applyCommand, INSTALL_URL, splitCommand, joinCommand, commandLine, shownCommand, isEdited, defaultPick, cleanRule, ruleProblem, RECENT_DEFAULT, argvOf, cleanLog, scrubDetail, normalizeAgents, whyText, itemOf, resultPath, sampleItem,
+  Platform, isDesktop, nodeDeps, newRule, setParts, pickAgent, toggleHandle, applyCommand, INSTALL_URL, splitCommand, joinCommand, commandLine, shownCommand, isEdited, defaultPick, cleanRule, upgradeRule, ruleProblem, RECENT_DEFAULT, argvOf, cleanLog, scrubDetail, normalizeAgents, whyText, itemOf, resultPath, sampleItem,
   previewOf, commandOf, ConsentModal, RulePicker,
   PROMPT_PARTS, PROMPT_ORDER, suggestArgv, modeFor, composePrompt, kindsFor, resultDocument,
 });
