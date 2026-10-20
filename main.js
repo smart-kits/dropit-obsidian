@@ -630,6 +630,7 @@ const STRINGS = {
       fullAccessAsk: 'No limits on the agent: dropit adds none. Claude Code runs with your own settings (skills, MCP servers, hooks, allow and deny rules) and your whole environment, on everything this rule receives. Anyone holding a send-only key for your account can then steer it through what they send. To limit it, add rules to your Claude Code settings or change the command (see the README, “No limits on the agent”). Turn it on?',
       fullAccessYes: 'Turn on',
       guideLink: 'Guide: let the agent read videos and more ↗',
+      audioNote: 'The agent may not be able to read audio or video files, or to hear what is said in a linked video (it depends on the agent you chose). We suggest a transcription tool of your own to handle them.',
       promptHint: 'The prompt is what you tell the agent. To have it read videos or use your own tools, see the guide.',
       modeDesc: {
         think: 'The agent has no tools. It can only read what it is given and answer in text.',
@@ -931,6 +932,7 @@ const STRINGS = {
       fullAccessAsk: '不限制 agent：dropit 不加任何限制。Claude Code 按你自己的设置运行（技能、MCP 服务、hooks、允许和拒绝规则），带着你的全部环境变量，处理这条规则收到的所有内容。持有你账号「只投递」密钥的人，可以通过他们发来的内容间接指挥它。要加限制，在 Claude Code 的设置里加规则，或改命令（见 README「不限制 agent」一节）。确定打开吗？',
       fullAccessYes: '打开',
       guideLink: '指南：让 agent 读视频，以及更多 ↗',
+      audioNote: 'agent 可能无法读取音频和视频文件，也可能听不到链接里的视频说了什么（取决于你选的 agent）。建议自己装转写工具来处理。',
       promptHint: '提示词是你对 agent 说的话。想让它读视频、用你自己的工具，见指南。',
       modeDesc: {
         think: 'agent 没有任何工具，只能读到给它的文字，只能回一段文字。',
@@ -2869,6 +2871,13 @@ const GUIDE_URL = {
   en: 'https://github.com/smart-kits/dropit-client/blob/main/docs/ai-videos.md',
   zh: 'https://github.com/smart-kits/dropit-client/blob/main/docs/ai-videos.zh-CN.md',
 };
+/** Said once, when the person ticks "audio & video": what the agent cannot do by itself, and where the guide is */
+function audioNotice() {
+  return new Notice(createFragment((f) => {
+    f.createDiv({ text: t.agents.audioNote });
+    guideLink(f.createDiv());
+  }), 12_000);
+}
 /** A link to the guide inside `parent`; clicking opens it in the browser */
 function guideLink(parent) {
   const a = parent?.createEl?.('a', { text: t.agents.guideLink, href: GUIDE_URL[lang] ?? GUIDE_URL.en });
@@ -3618,6 +3627,7 @@ class DropitSettingTab extends PluginSettingTab {
     for (const id of ['sum', 'link', 'ocr', 'audio']) {
       checkbox(u.handleOpts[id], (rule.parts ?? []).includes(id), '', (on) => {
         toggleHandle(rule, id, on);
+        if (on && id === 'audio') audioNotice();       // once, at the moment it is ticked: not a line that stays
         syncPrompt();
         if (note) note.toggle(!rule.kinds.length);
       });
@@ -3890,8 +3900,20 @@ class CommandView extends Modal {
     const a = t.agents;
     contentEl.createEl('h3', { text: u.showCommand });
     const out = contentEl.createDiv({ cls: 'dropit-agent-preview' });
-    new Setting(contentEl).setName(u.commandViewKind)
-      .addDropdown((d) => d.addOptions(Object.fromEntries(Object.keys(a.samples).map((k) => [k, a.samples[k]]))).setValue(this.pv.sample).onChange((v) => { this.pv.sample = v; this.show(out); }));
+    // The choice of example is there to show that the command differs by kind of content (a text gets no tool, a link one site,
+    // a file its own copy). When it is the same command for every kind (no limits, or a command of your own) there is nothing to choose
+    const kindSample = { text: 'text', url: 'url', image: 'image', video: 'video', file: 'file' };
+    const runs = new Map();
+    for (const k of Object.keys(kindSample)) {
+      const plan = planRun({ ...this.rule, enabled: true }, sampleItem(k));
+      if (plan.run) runs.set(k, JSON.stringify([plan.bin, plan.argv]));
+    }
+    if (new Set(runs.values()).size > 1) {
+      new Setting(contentEl).setName(u.commandViewKind)
+        .addDropdown((d) => d.addOptions(Object.fromEntries(Object.keys(a.samples).map((k) => [k, a.samples[k]]))).setValue(this.pv.sample).onChange((v) => { this.pv.sample = v; this.show(out); }));
+    } else if (runs.size && !runs.has(this.pv.sample)) {
+      this.pv.sample = [...runs.keys()][0];      // the one example this rule would run for
+    }
     contentEl.appendChild(out);
     this.show(out);
     // Only here, where the person went to see exactly what runs: how to change it, and where the guide is
