@@ -207,6 +207,39 @@ may do is up to you.
 
 **Desktop only.** On a phone this part of the settings says so and nothing is ever started; receiving works as usual.
 
+### No limits on the agent
+
+By default Claude Code gets only what each item needs. If you want an agent that can do more (open pages that need a login, use a key
+for a link that is not public, run a skill or an MCP server, work on a video), tick **Don’t limit the agent** next to the four boxes. It asks once,
+with the warning in full.
+
+With it on, dropit adds nothing and takes nothing away: it starts `claude -p --no-session-persistence` (the *Command* line shows it).
+Claude Code runs with **your own settings** (skills, MCP servers, hooks, instructions, allow and deny rules) and **your whole
+environment**. The item's file is copied into the working folder, as before. Untick it to go back.
+
+- **This is the setting that matters most for safety.** What arrives is still untrusted, and anyone holding a send-only key for your
+  account can put content in front of the agent. With no limits that content can steer an agent that has everything your own setup
+  allows, with nobody there to confirm. Remove devices you no longer use, and keep the permissions in your Claude Code settings as
+  tight as the job allows.
+- **The permissions are yours.** The run is unattended, so nothing can ask you: an action that needs approval is refused unless your
+  Claude Code settings already allow it. To let it do something, allow it there.
+- **To limit it,** put allow and deny rules in your Claude Code settings, or edit the *Command* line and name what it may use, for
+  example `claude -p --permission-mode dontAsk --allowedTools WebFetch --disallowedTools Bash` (see `claude --help`: `--allowedTools`,
+  `--disallowedTools`, `--permission-mode`, `--add-dir`). An edited command is run exactly as written and gets only `PATH`, `HOME`
+  and `USER`, so a key it needs belongs in your script or your keychain.
+- **Skills, tools, MCP servers:** set them up in Claude Code itself; with no limits they are loaded, and your prompt can ask for them.
+  *Show…* lists the command and the names (not the values) of the environment it would get.
+- Obsidian started from the Dock or Start menu may not see variables you set in your shell profile. If the agent needs one, put it in
+  Claude Code's own settings or in a script that sets it.
+
+**Reading what is said in a video** (Douyin, TikTok, Bilibili…) is written up step by step in [the guide](https://github.com/smart-kits/dropit-client/blob/main/docs/ai-videos.md): the tools, a small script, what to allow, and what was and was not tested.
+
+Some things people set up this way. These are your own setups, not features of dropit, and dropit has not checked them:
+
+- *Video, audio:* a script of your own (a downloader and a speech-to-text tool, say) as a custom command.
+- *Pages behind a login:* an MCP server that drives a browser with its own saved profile, called from the prompt.
+- *Links that are not public:* a key in your script or keychain that the command sends along.
+
 ## Run your own command after each item
 
 *Settings → dropit → Handle automatically after it arrives → Run an Obsidian command* picks any Obsidian command — a QuickAdd macro, a
