@@ -76,7 +76,7 @@ Module._load = (req, ...rest) => (req !== 'obsidian' && /obsidian-plugin\/main\.
         constructor(app) { this.app = app; this.commands = []; this.manifest = { id: 'dropit' }; }
         addCommand(c) { this.commands.push(c); }
         addRibbonIcon() {} addSettingTab() {} addStatusBarItem() { return el(); }
-        registerDomEvent() {} registerEvent() {} registerInterval() {} register() {}
+        registerDomEvent() {} registerEvent() {} registerInterval() {} register(fn) { (this.cleanups ??= []).push(fn); }
         async loadData() { return this.stored; }
         async saveData(d) { this.stored = JSON.parse(JSON.stringify(d)); }
       },
@@ -967,6 +967,8 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     // upgrade_url gets its source; the hourly limit is never sold; unsafe links stay dropped
     ok('upgradeLink tags the source at the end', T.upgradeLink({ upgrade_url: UP }) === `${UP}&src=obsidian`, T.upgradeLink({ upgrade_url: UP }));
     ok('…a link with no query gets ?src', T.upgradeLink({ upgrade_url: 'https://dropit.example/upgrade' }) === 'https://dropit.example/upgrade?src=obsidian');
+    ok('…and a link with a #fragment gets it before the fragment, whether or not it has a query', T.upgradeLink({ upgrade_url: 'https://dropit.example/upgrade#plans' }) === 'https://dropit.example/upgrade?src=obsidian#plans'
+      && T.upgradeLink({ upgrade_url: 'https://dropit.example/upgrade?a=1#plans' }) === 'https://dropit.example/upgrade?a=1&src=obsidian#plans');
     ok('…the hourly limit has no link', T.upgradeLink({ upgrade_url: UP, window: 'hour' }) === null);
     ok('…nor an unsafe or missing one', T.upgradeLink({ upgrade_url: 'javascript:alert(1)' }) === null && T.upgradeLink({}) === null && T.upgradeLink(undefined) === null);
     {
@@ -2320,6 +2322,32 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       ok('fetching it later does not run the batch again', started(made.p).length === 1, JSON.stringify(made.p.runs));
     }
 
+    // ── the limits on words are for the words: a long text does not get its files skipped ──
+    hold();
+    {
+      const long = 'LONGWORDS '.repeat(8);
+      const { p, files } = await setup([[bt(630, `${long} MODE:stdin`, 1, 2), bi(631, 'a.png', 2, 2)]], {}, rule({ maxChars: 20 }));
+      await pull(p);
+      const note = files.get(notesIn(files)[0]);
+      ok('words over the longest, with a picture: the batch still runs, on the picture', started(p).length === 1 && answerOf2(note).includes('file ./a.png') && p.settings.batchRuns[ID].state === 'done', JSON.stringify(p.runs));
+      ok('…the agent is not given the long words, and is told they were left out', !answerOf2(note).includes('LONGWORDS') && answerOf2(note).includes('1 text was too long and left out'), note);
+      ok('…and the note keeps them, as it arrived', note.includes('LONGWORDS'), note);
+    }
+    hold();
+    {
+      const { p, files } = await setup([[bt(640, 'a short one MODE:stdin', 1, 2), bi(641, 'a.png', 2, 2)]], {}, rule({ minChars: 500 }));
+      await pull(p);
+      ok('words under the shortest, with a picture: the batch runs (the shortest is for a text on its own)', started(p).length === 1 && resultsIn(files).length === 0 && /file \.\/a\.png/.test(files.get(notesIn(files)[0])), JSON.stringify(p.runs));
+    }
+    hold();
+    {
+      const { p } = await setup([[bt(650, 'only words, and too long', 1, 2), bt(651, 'more words', 2, 2)]], {}, rule({ maxChars: 5 }));
+      notices.length = 0;
+      await pull(p);
+      ok('a batch of words alone that is past the longest is not run, and the run record says why', started(p).length === 0 && p.runs.some((r) => r.kind === 'batch' && r.why === 'skipped:long'), JSON.stringify(p.runs));
+      ok('…and it is not silent: one notice says so, naming the rule', notices.filter((n) => /batch of words/.test(n) && /longest/.test(n)).length === 1, JSON.stringify(notices));
+    }
+
     // ── a failed run leaves the note, is said once, and is not tried again ──
     hold();
     {
@@ -2358,13 +2386,19 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       again.p.batchResume();
       await settle();
       ok('after a restart it waits again, in full, and has not run', started(again.p).length === 0 && live().length === 1 && live()[0].ms === 90_000, JSON.stringify(held));
+      // Text that came in the batch links to a file of the vault: the restart hands over what was saved for the batch, not that
+      const notePath = notesIn(again.files)[0];
+      again.files.set('Private/secret.md', 'SECRET OF THE VAULT');
+      again.files.set(notePath, `${again.files.get(notePath).trimEnd()}\n\n![[Private/secret.md]]\n`);
       await fire(again.p);
-      const note = again.files.get(notesIn(again.files)[0]);
+      const note = again.files.get(notePath);
       ok('when the clock rings it runs from the note, once, with the words and the file', started(again.p).length === 1 && answerOf2(note).includes('restart me') && answerOf2(note).includes('file ./a.png') && again.p.settings.batchRuns[ID].state === 'done', note);
+      ok('…and a file the text of the note links to is not handed over', !note.includes('SECRET OF THE VAULT') && !answerOf2(note).includes('secret.md'), note);
       // what was running when Obsidian closed is not run again
       const mid = await makePlugin(undefined, clone({ ...stored, batchRuns: { [ID]: { ...stored.batchRuns[ID], state: 'running' } } }));
       mid.p.batchResume();
-      ok('a batch that was running when it closed is counted done, not run again', mid.p.settings.batchRuns[ID].state === 'done' && live().length === 0 && started(mid.p).length === 0);
+      ok('a batch that was running when it closed is counted done, not run again, and the run record says so', mid.p.settings.batchRuns[ID].state === 'done' && live().length === 0 && started(mid.p).length === 0
+        && mid.p.runs.some((r) => r.why === 'skipped:restart' && r.seq === Math.min(...stored.batchRuns[ID].seen)), JSON.stringify(mid.p.runs));
       // a shared note cannot be taken apart again
       const shared = await makePlugin(undefined, clone({ ...stored, batchRuns: { [ID]: { ...stored.batchRuns[ID], note: null } } }));
       shared.p.batchResume();
@@ -2414,27 +2448,45 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
   console.log('── Auto-processing: the invisible line that marks where an answer starts ──');
   {
     const ID = 'bMARK00001';
-    const MARK = '<!-- dropit:answer -->';
+    const NONCE = 'n0123456789abcdef01234567';
+    const MARK = `<!-- dropit:answer ${NONCE} -->`;
     const made = await makePlugin(agentsOf([fakeRule({ enabled: false, auto: false, mode: 'auto', prompt: 'MODE:stdin' })]));
     const { p, files, fm, metadataCache } = made;
     metadataCache.getFirstLinkpathDest = (link) => (files.has(`Inbox/${link}`) ? { path: `Inbox/${link}`, name: link } : null);
     files.set('Inbox/a.png', Buffer.from('png'));
-    const FRONT = `---\nkind: batch\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_batch: ${ID}\ndropit_seq: [811, 812]\n---\n`;
+    const HEAD = `---\nkind: batch\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_batch: ${ID}\n`;
+    const FRONT = `${HEAD}dropit_answered: false\ndropit_nonce: "${NONCE}"\ndropit_seq: [811, 812]\n---\n`;
     const path = 'Inbox/09-17 08.00 marked.md';
-    fm.set(path, { kind: 'batch', source: 'web', created: '2026-09-17T08:00:00.000Z', dropit_batch: ID, dropit_seq: [811, 812] });
+    fm.set(path, { kind: 'batch', source: 'web', created: '2026-09-17T08:00:00.000Z', dropit_batch: ID, dropit_answered: false, dropit_nonce: NONCE, dropit_seq: [811, 812] });
     const file = { path, name: '09-17 08.00 marked.md', extension: 'md' };
     const ownText = 'part one\n\n---\n\npart two after its own rule';
     const before = `${FRONT}\n${ownText}\n\n![[a.png]]\n`;
     files.set(path, before);
-    ok('appendAnswer writes the rule, the marker line, then the answer; front matter untouched', await p.appendAnswer(path, 'THE ANSWER\n\n---\n\nsecond part', before)
-      && files.get(path) === `${before.trimEnd()}\n\n---\n\n${MARK}\n\nTHE ANSWER\n\n---\n\nsecond part\n` && files.get(path).startsWith(FRONT), files.get(path));
+    // a batch note with no answer yet is all what arrived, whatever rules the person's own text has
+    const unanswered = await p.payloadOfNote(file);
+    ok('a note that says it has no answer yet is read whole: the text after its own rule is not cut off', unanswered.text === ownText && same(unanswered.files, ['Inbox/a.png']) && unanswered.original === `${ownText}\n\n![[a.png]]`, JSON.stringify(unanswered));
+    ok('appendAnswer writes the rule, the marker line with the note\'s number, then the answer; the front matter says it is answered', await p.appendAnswer(path, 'THE ANSWER\n\n---\n\nsecond part', before)
+      && files.get(path) === `${before.replace('dropit_answered: false', 'dropit_answered: true').trimEnd()}\n\n---\n\n${MARK}\n\nTHE ANSWER\n\n---\n\nsecond part\n`, files.get(path));
     const answeredNote = files.get(path);
     const d = await p.payloadOfNote(file);
     ok('what the person wrote has a rule of its own: it is all still what arrived, and the answer is not', d.text === ownText && same(d.files, ['Inbox/a.png']) && !JSON.stringify(d).includes('THE ANSWER') && !JSON.stringify(d).includes('second part\\n'), JSON.stringify(d));
     ok('…its original ends where the person ended it, with no rule dropit added', d.original === `${ownText}\n\n![[a.png]]`, JSON.stringify(d.original));
-    files.set(path, `${FRONT}\nthe words\n\n![[a.png]]\n\n---\n\nOLD ANSWER\n\n---\n\nmore of it\n`);
+    // a note from before there were numbers: no number, no flag
+    const LEGACY = `${HEAD}dropit_seq: [811, 812]\n---\n`;
+    files.set(path, `${LEGACY}\nthe words\n\n![[a.png]]\n\n---\n\nOLD ANSWER\n\n---\n\nmore of it\n`);
     const old = await p.payloadOfNote(file);
-    ok('a note with no marker (written before) is cut at its first rule, as before', old.text === 'the words' && same(old.files, ['Inbox/a.png']) && !JSON.stringify(old).includes('OLD ANSWER') && !JSON.stringify(old).includes('more of it'), JSON.stringify(old));
+    ok('a note from before (no flag, no marker) is cut at its first rule, as before', old.text === 'the words' && same(old.files, ['Inbox/a.png']) && !JSON.stringify(old).includes('OLD ANSWER') && !JSON.stringify(old).includes('more of it'), JSON.stringify(old));
+    files.set(path, `${LEGACY}\nthe words\n\n![[a.png]]\n\n---\n\n<!-- dropit:answer -->\n\nOLDER ANSWER\n`);
+    const older = await p.payloadOfNote(file);
+    ok('…and one answered by the version that wrote the plain marker is cut at it', older.text === 'the words' && !JSON.stringify(older).includes('OLDER ANSWER'), JSON.stringify(older));
+    // answering a note from before gives it its number and its flag
+    const legacyBefore = `${LEGACY}\nthe words\n\n![[a.png]]\n`;
+    files.set(path, legacyBefore);
+    ok('a note from before is answered too: it gets the flag and a number of its own', await p.appendAnswer(path, 'LEGACY ANSWER', legacyBefore)
+      && /\ndropit_answered: true\ndropit_nonce: "n[0-9a-f]{24}"\n---\n/.test(files.get(path)) && /\n\n---\n\n<!-- dropit:answer n[0-9a-f]{24} -->\n\nLEGACY ANSWER\n$/.test(files.get(path)), files.get(path));
+    const legacyAnswered = await p.payloadOfNote(file);
+    ok('…and what arrived is told apart from that answer by the number', legacyAnswered.text === 'the words' && !JSON.stringify(legacyAnswered).includes('LEGACY ANSWER'), JSON.stringify(legacyAnswered));
+    // a second answer under the first
     files.set(path, `${answeredNote.trimEnd()}\n\n---\n\n${MARK}\n\nSECOND ANSWER\n`);
     const two = await p.payloadOfNote(file);
     ok('two answers in a note: only what is above the first marker arrived', two.text === ownText && !JSON.stringify(two).includes('ANSWER'), JSON.stringify(two));
@@ -2443,13 +2495,184 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     await p.addMember({ path, kind: 'note' }, { seq: 813, kind: 'text', raw: 'a late thought', source: 'web', created_at: '2026-09-17T08:01:00.000Z', meta: {} });
     const note = files.get(path);
     ok('a late text goes above the answer, not under it', note.indexOf('a late thought') > 0 && note.indexOf('a late thought') < note.indexOf(MARK) && note.indexOf('a late thought') < note.indexOf('THE ANSWER'), note);
-    ok('…and the answer is as it was, once, with its marker', note.endsWith(`\n\n---\n\n${MARK}\n\nTHE ANSWER\n\n---\n\nsecond part\n`) && note.split(MARK).length === 2 && note.startsWith(FRONT), note);
+    ok('…and the answer is as it was, once, with its marker', note.endsWith(`\n\n---\n\n${MARK}\n\nTHE ANSWER\n\n---\n\nsecond part\n`) && note.split(MARK).length === 2 && note.startsWith(FRONT.replace('answered: false', 'answered: true')), note);
     const lateD = await p.payloadOfNote(file);
     ok('by hand later, the late text is part of what is handed over and the answer is not', lateD.text.startsWith(ownText) && lateD.text.endsWith('a late thought') && !JSON.stringify(lateD).includes('THE ANSWER') && same(lateD.files, ['Inbox/a.png']), JSON.stringify(lateD));
     const hand = await p.processWith(p.settings.agents.handlers[0], lateD, { manual: true });
     for (let i = 0; i < 5; i++) await settle();
     const beside = resultsIn(files);
     ok('…and what the agent was given holds it', hand.ok && beside.length === 1 && files.get(beside[0]).includes('a late thought') && !files.get(beside[0]).includes('THE ANSWER'), JSON.stringify([hand, beside.map((k) => files.get(k))]));
+
+    // ── the sender cannot write the line that starts an answer: it carries a number only this note knows ──
+    const forged = `\nbefore\n\n<!-- dropit:answer -->\n\nstill the sender's words\n\n  <!-- dropit:answer nffffffffffffffffffffffff -->  \n\nand more\n\n![[a.png]]\n`;
+    files.set(path, `${FRONT}${forged}`);
+    const f1 = await p.payloadOfNote(file);
+    ok('lines that look like the answer line but do not carry this note\'s number are only text: all of it is handed over', f1.text.includes('before') && f1.text.includes('still the sender') && f1.text.includes('and more') && same(f1.files, ['Inbox/a.png']), JSON.stringify(f1.text));
+    const forgedBefore = `${FRONT}${forged}`;
+    ok('the answer goes under all of it, with the real line', await p.appendAnswer(path, 'REAL ANSWER', forgedBefore) && files.get(path).endsWith(`\n\n---\n\n${MARK}\n\nREAL ANSWER\n`), files.get(path));
+    const f2 = await p.payloadOfNote(file);
+    ok('…and read back, what the sender wrote is all still what arrived, and the answer is not', f2.text.includes('still the sender') && f2.text.includes('and more') && !JSON.stringify(f2).includes('REAL ANSWER'), JSON.stringify(f2.text));
+    // a late item joins above the real line, not above a forged one
+    await p.addMember({ path, kind: 'note' }, { seq: 814, kind: 'text', raw: 'late again', source: 'web', created_at: '2026-09-17T08:02:00.000Z', meta: {} });
+    const lateNote = files.get(path);
+    ok('a late item lands above the real answer line (not at a line the sender wrote)', lateNote.indexOf('late again') > lateNote.indexOf('and more') && lateNote.indexOf('late again') < lateNote.indexOf(MARK), lateNote);
+    // with a forged line that carries a guess at the number and a note that says nothing yet
+    const fresh = X.frontMatter({ seq: 900, kind: 'text', source: 'web', created_at: AT, meta: { group: { id: ID, i: 1, n: 2 } } }, 'dropit_seq');
+    ok('a batch note starts out unanswered, with its own number', /\ndropit_answered: false\n/.test(fresh) && /\ndropit_nonce: "n[0-9a-f]{24}"\n/.test(fresh), fresh);
+    ok('…a different number each time', fresh.match(/dropit_nonce: "(n[0-9a-f]{24})"/)[1] !== X.frontMatter({ seq: 900, kind: 'text', source: 'web', created_at: AT, meta: { group: { id: ID, i: 1, n: 2 } } }, 'dropit_seq').match(/dropit_nonce: "(n[0-9a-f]{24})"/)[1]);
+    ok('…and a note that is not part of a batch has neither', !/dropit_answered|dropit_nonce/.test(X.frontMatter({ seq: 901, kind: 'text', source: 'web', created_at: AT, meta: null }, 'dropit_seq')));
+  }
+
+  console.log('── Auto-processing: a batch note made by a sync is unanswered, then answered ──');
+  {
+    const made = await makePlugin();
+    const { p, files } = made;
+    const g = (i) => ({ group: { id: 'bFLAG00001', i, n: 2 } });
+    serve({ 'GET /v1/pull': pages([text(950, 'first', { meta: g(1) }), text(951, 'second\n\n---\n\nafter its own rule', { meta: g(2) })]) });
+    await p.sync(false);
+    const note = [...files.keys()].find((k) => k.endsWith('.md'));
+    ok('the note a batch starts has the flag and a number in its front matter', /\ndropit_answered: false\n/.test(files.get(note)) && /\ndropit_nonce: "n[0-9a-f]{24}"\n/.test(files.get(note)), files.get(note));
+    const read = await p.payloadOfNote({ path: note, name: '', extension: 'md' });
+    ok('…and it is read whole, the text after a rule that a member brought included', read.kind === 'batch' && read.text.includes('first') && read.text.includes('after its own rule'), JSON.stringify(read.text));
+  }
+
+  console.log('── Auto-processing: only the files dropit saved are handed over ──');
+  {
+    const ID = 'bLINKS0001';
+    const NONCE = 'n0123456789abcdef01234567';
+    const made = await makePlugin(agentsOf([fakeRule({ enabled: false, auto: false, mode: 'auto', prompt: 'MODE:stdin' })]));
+    const { p, files, fm, metadataCache } = made;
+    metadataCache.getFirstLinkpathDest = (link) => (files.has(link) ? { path: link, name: link.split('/').pop() } : files.has(`Inbox/${link}`) ? { path: `Inbox/${link}`, name: link } : null);
+    files.set('Inbox/a.png', Buffer.from('png'));
+    files.set('Inbox/b.png', Buffer.from('png'));
+    files.set('Private/x.md', 'PRIVATE NOTE');
+    files.set('.obsidian/app.json', '{"secret":1}');
+    const FRONT = `---\nkind: batch\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_batch: ${ID}\ndropit_answered: false\ndropit_nonce: "${NONCE}"\ndropit_seq: [821, 822]\n---\n`;
+    const path = 'Inbox/09-17 08.00 links.md';
+    files.set(path, `${FRONT}\nthe words\n\n![[a.png]]\n\n![[Private/x.md]]\n\n![[.obsidian/app.json]]\n`);
+    fm.set(path, { kind: 'batch', source: 'web', created: '2026-09-17T08:00:00.000Z', dropit_batch: ID, dropit_answered: false, dropit_nonce: NONCE, dropit_seq: [821, 822] });
+    const file = { path, name: '09-17 08.00 links.md', extension: 'md' };
+    const d = await p.payloadOfNote(file);
+    ok('by hand, a note hands over the files in the place dropit saves them, and no file of the vault it links to', same(d.files, ['Inbox/a.png']) && !JSON.stringify([d.files, d.parts]).match(/Private|app\.json/) && !JSON.stringify(d).includes('PRIVATE'), JSON.stringify(d));
+    const hand = await p.processWith(p.settings.agents.handlers[0], d, { manual: true });
+    for (let i = 0; i < 5; i++) await settle();
+    const out = files.get(resultsIn(files)[0] ?? '') ?? '';
+    ok('…so the agent is given the picture, and neither of the others', hand.ok && out.includes('file ./a.png') && !out.includes('file ./x.md') && !out.includes('file ./app.json') && !out.includes('PRIVATE NOTE') && !out.includes('"secret"'), out);
+    // a single received note: the same
+    const one = 'Inbox/09-17 08.00 one.md';
+    files.set(one, `---\nkind: image\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_seq: 823\n---\n\n![[Private/x.md]]\n`);
+    fm.set(one, { kind: 'image', source: 'web', created: '2026-09-17T08:00:00.000Z', dropit_seq: 823 });
+    const single = await p.payloadOfNote({ path: one, name: 'one.md', extension: 'md' });
+    ok('a single note that links a file elsewhere in the vault has no file to hand over', same(single.files, []), JSON.stringify(single));
+    // a batch that is remembered: its own list, nothing the text says
+    const rec = await p.payloadOfNote(file, { recorded: ['Inbox/b.png', 'Inbox/gone.png'] });
+    ok('with the files recorded for the batch, those are the files (the ones that are still there), whatever the note embeds', same(rec.files, ['Inbox/b.png']) && rec.parts.filter((x) => x.file).length === 1, JSON.stringify(rec.files));
+    p.settings.batchRuns[ID] = { at: Date.now(), first: Date.now(), count: 2, seen: [821, 822], note: path, state: 'wait', resumed: true,
+      order: [{ seq: 821, i: 1, text: true, files: [] }, { seq: 822, i: 2, text: false, files: ['Inbox/b.png'] }] };
+    const resumed = await p.batchPayload(ID, p.settings.batchRuns[ID]);
+    ok('a batch run again after a restart takes the recorded files, not those the note links to', same(resumed.files, ['Inbox/b.png']) && !resumed.files.includes('Private/x.md'), JSON.stringify(resumed.files));
+    p.settings.batchRuns[ID].order = [];
+    const none = await p.batchPayload(ID, p.settings.batchRuns[ID]);
+    ok('…and with nothing recorded, no file at all', same(none.files, []), JSON.stringify(none.files));
+  }
+
+  console.log('── Memory: files being sent, files fetched ahead ──');
+  {
+    const gate = X.byteGate(10);
+    const order = [];
+    const r1 = await gate.acquire(6);
+    const w2 = gate.acquire(6).then((rel) => { order.push('second'); return rel; });
+    const w3 = gate.acquire(3).then((rel) => { order.push('third'); return rel; });
+    await settle();
+    ok('a gate holds back what would not fit, and keeps the order of asking (a small one does not pass a big one)', order.length === 0 && gate.used === 6, JSON.stringify([order, gate.used]));
+    r1(); r1();
+    const r2 = await w2;
+    const r3 = await w3;
+    ok('…and lets them in as room is given back (giving back twice gives back once)', same(order, ['second', 'third']) && gate.used === 9, JSON.stringify([order, gate.used]));
+    r2(); r3();
+    const big = await gate.acquire(50);
+    ok('one bigger than the whole goes alone', gate.used === 50);
+    let small = false;
+    const ws = gate.acquire(1).then((rel) => { small = true; return rel; });
+    await settle();
+    ok('…and nothing goes beside it', !small);
+    big();
+    (await ws)();
+    ok('…until it is done', small && gate.used === 0);
+
+    const { p, files } = await makePlugin({ device_id: 'd_me' });
+    p.meCache = { m: { item_bytes_limit: 100 << 20 }, at: Date.now() };
+    let running = 0, peak = 0;
+    const calls = serve({ 'POST /v1/ingest/file': async () => { running++; peak = Math.max(peak, running); await new Promise((r) => setTimeout(r, 15)); running--; return { json: { seq: 77 } }; } });
+    const uploads = () => calls.filter((c) => c.path.startsWith('/v1/ingest/file'));   // not the real-time ticket asks that go on beside
+    const mk = (name, mb) => { files.set(`B/${name}`, Buffer.from('x')); return { path: `B/${name}`, name, extension: 'bin', stat: { size: mb << 20 } }; };
+    await p.sendFiles([mk('a.bin', 40), mk('b.bin', 40), mk('c.bin', 40)]);
+    ok('three files of 40 MB are sent one after the other (no more than about 64 MB in memory at once)', peak === 1 && uploads().length === 3, JSON.stringify([peak, uploads().length]));
+    peak = 0;
+    await p.sendFiles([mk('d.bin', 20), mk('e.bin', 20), mk('f.bin', 20)]);
+    ok('three of 20 MB go together, as before', peak === 3, String(peak));
+    ok('nothing stays held when they are done', p.sendMemory.used === 0);
+    // the account's own limit for one item, as last read, is checked before the file is read
+    calls.length = 0;
+    p.meCache = { m: { item_bytes_limit: 5 << 20 }, at: Date.now() };
+    let readOne = false;
+    const readBinary = p.app.vault.readBinary;
+    p.app.vault.readBinary = async (f) => { readOne = true; return readBinary(f); };
+    notices.length = 0;
+    await p.sendFiles([mk('g.bin', 6)]);
+    ok('a file over what the account allows for one item is refused before it is read or sent, saying how much', uploads().length === 0 && !readOne && notices.some((n) => n.includes('Larger than 5 MB')), JSON.stringify([uploads().length, readOne, notices]));
+    await p.sendFiles([mk('h.bin', 4)]);
+    ok('…one under it goes', uploads().length === 1 && readOne);
+    p.app.vault.readBinary = readBinary;
+    // a failed request still gives its memory back
+    serve({ 'POST /v1/ingest/file': () => ({ status: 500, json: { error: 'SERVER' } }) });
+    await p.sendFiles([mk('i.bin', 20)]);
+    ok('a send that fails gives its bytes back', p.sendMemory.used === 0);
+
+    // fetched ahead: a window of bytes, the first one always
+    const fa = await makePlugin({ device_id: 'd_me' });
+    const started = [];
+    fa.p.download = (item) => { started.push(item.seq); return Promise.resolve({ status: 200 }); };
+    const dl = (seq, mb) => ({ seq, url: `https://files.example/${seq}`, bytes: mb << 20, device_id: 'd_other' });
+    fa.p.fetchAhead([dl(1, 20), dl(2, 20), dl(3, 20)], 0);
+    ok('what is fetched ahead stays within a window of bytes: 20 + 20 fit, the third waits', same(started, [1, 2]) && fa.p.fetched.size === 2, JSON.stringify(started));
+    fa.p.fetchAhead([dl(1, 20), dl(2, 20), dl(3, 20)], 0);
+    ok('…and what already goes is not started twice', same(started, [1, 2]));
+    fa.p.dropFetched();
+    started.length = 0;
+    fa.p.fetchAhead([dl(4, 100), dl(5, 1), dl(6, 1)], 0);
+    ok('the one needed now is fetched whatever its size, and nothing is fetched beside it while it fills the window', same(started, [4]), JSON.stringify(started));
+    // let go: the answer of a download that is let go is thrown away
+    serve({ 'GET /': () => ({ bytes: PNG_BYTES() }) });
+    fa.p.dropFetched();
+    const live = Object.getPrototypeOf(fa.p).download.call(fa.p, { url: 'https://files.example/9' });   // the real one: above it was replaced by a stub
+    fa.p.fetched.set(9, live);
+    const outcome = live.then(() => 'kept', () => 'dropped');
+    fa.p.dropFetched();
+    ok('letting go empties the list, and a download let go does not keep its answer', fa.p.fetched.size === 0 && (await outcome) === 'dropped');
+    // turned off: nothing is held, nothing is started
+    fa.p.batchTimers.set('b', 1);
+    fa.p.batchMembers.set('b', []);
+    fa.p.fetched.set(10, Promise.resolve({}));
+    for (const fn of fa.p.cleanups ?? []) fn();
+    ok('turning the plugin off empties the batch timers, the waiting members and the downloads ahead', fa.p.batchTimers.size === 0 && fa.p.batchMembers.size === 0 && fa.p.fetched.size === 0 && fa.p.unloaded === true);
+    started.length = 0;
+    fa.p.fetchAhead([dl(11, 1)], 0);
+    ok('…and no download is started after that', started.length === 0);
+  }
+
+  console.log('── The account is read once at a start, not at every start ──');
+  {
+    const { p } = await makePlugin({ token: 'dk_x', momentsCheckedAt: 0, lastPlan: 'free', lastPaidUntil: 0 });
+    p.sync = async () => 0; p.connect = () => {}; p.refreshEndpoints = () => {};
+    const calls = serve({ 'GET /v1/me': () => ({ json: { plan: 'free', devices_used: 1, devices_limit: 3 } }) });
+    await p.start();
+    ok('the time of the check is kept even when nothing in the account changed', p.settings.momentsCheckedAt > 0 && p.stored.momentsCheckedAt === p.settings.momentsCheckedAt && calls.filter((c) => c.path === '/v1/me').length === 1, JSON.stringify([p.stored.momentsCheckedAt, calls.map((c) => c.path)]));
+    const again = await makePlugin(undefined, JSON.parse(JSON.stringify(p.stored)));
+    again.p.sync = async () => 0; again.p.connect = () => {}; again.p.refreshEndpoints = () => {};
+    const calls2 = serve({ 'GET /v1/me': () => ({ json: { plan: 'free' } }) });
+    await again.p.start();
+    ok('…so the next start does not read the account again', calls2.filter((c) => c.path === '/v1/me').length === 0, JSON.stringify(calls2.map((c) => c.path)));
   }
 
   console.log('── Auto-processing: by hand ──');
@@ -2697,7 +2920,8 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('a saved default is cleaned: only ids, no repeats, anything else is nothing', same(X.cleanTargets(['d_a', 'd_a', '', 5, null]), ['d_a']) && same(X.cleanTargets('d_a'), []) && same(X.cleanTargets(undefined), []));
     ok('the saved default meets the devices that are there: the part that still exists is kept', same(X.reconcileTargets(['d_a', 'd_gone'], receiversOf), { ids: ['d_a'], gone: 1 }));
     ok('…none of it left: back to all (empty), and it says how many went', same(X.reconcileTargets(['d_gone', 'd_old'], receiversOf), { ids: [], gone: 2 }));
-    ok('…naming every device is "all" (empty); nothing saved is nothing lost', same(X.reconcileTargets(['d_b', 'd_a'], receiversOf), { ids: [], gone: 0 }) && same(X.reconcileTargets([], receiversOf), { ids: [], gone: 0 }));
+    ok('…a chosen set that names every device stays a chosen set (a device added later is not in it); nothing saved is nothing lost', same(X.reconcileTargets(['d_b', 'd_a'], receiversOf), { ids: ['d_b', 'd_a'], gone: 0 }) && same(X.reconcileTargets([], receiversOf), { ids: [], gone: 0 }));
+    ok('…one of the chosen gone, the rest naming every device that is left: still the rest, and it says one went', same(X.reconcileTargets(['d_a', 'd_b', 'd_gone'], receiversOf), { ids: ['d_a', 'd_b'], gone: 1 }));
     ok('the folded line: All, the device\'s name, or how many', X.targetsSummary([], receiversOf) === 'All' && X.targetsSummary(['d_a'], receiversOf) === 'Pixel'
       && X.targetsSummary(['d_a', 'd_b'], [...receiversOf, { device_id: 'd_z', name: 'Z' }]) === '2 devices' && X.targetsSummary(['d_a', 'd_b'], null) === '2 devices' && X.targetsSummary([], null) === 'All');
     ok('…in Chinese too (全部 / 名字 / N 台)', Z.set.allDevices === '全部' && Z.set.deviceN(3) === '3 台' && Z.set.delivery === '投递' && Z.set.defaultTo === '默认投给' && Z.set.selectAll === '全选');

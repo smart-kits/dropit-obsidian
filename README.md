@@ -174,7 +174,7 @@ Inbox/10-16 14.02 Thursday meeting.md          ← the same note, once it was pr
 - **A failure is said on screen**, at most once a minute, so a missing agent does not fill the screen. The note it was about stays
   as it arrived. dropit keeps no record of runs.
 - **Limits** (folded by default) are your own numbers: a minimum length for text, a time limit, the longest text, the largest file, how many of a backlog get processed (the newest 3 by default; 0 = all; the rest are still written to your vault), and, for Claude, a model name (passed as `--model`; empty uses Claude's own default).
-  There is none built in.
+  There is none built in. The text limits are for words: when the words of a batch sent together are longer than the longest and it has files, the words are left out (the agent is told) and the files are still handled; the minimum only applies to a text on its own. A batch of words alone that a limit turns away says so in a notice.
 
 ### What the agent gets to use
 
