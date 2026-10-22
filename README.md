@@ -298,7 +298,7 @@ module.exports = async ({ app }) => {
   seconds (it does a small calculation on your computer, nothing is sent for it) and then carries on by itself.
   If that doesn't work, it asks you to create the account in the browser instead.
 - **Free to use; an optional paid plan raises the limits.** Everything described here works on the free plan, within its limits:
-  20 items a day, files up to 10 MB, items kept for 1 day, 3 devices, and real-time delivery for the first 14 days
+  20 items a day, files up to 10 MB, items kept for 1 day, 2 devices, and real-time delivery for the first 14 days
   after signing up. After that, new items come in when Obsidian opens, when you come back to its window, or when you
   click *Sync now*. The plugin tells you once when the real-time period is about to end and once when it has ended
   (what you used it for, and what changes), and once when a paid year is about to end or has ended. Nothing else is shown.

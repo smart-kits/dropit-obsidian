@@ -758,7 +758,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
   for (const mode of ['note', 'append', 'daily']) {
     const { p } = await makePlugin({ mode });
     serve({
-      'GET /v1/me': () => ({ json: { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 } }),
+      'GET /v1/me': () => ({ json: { plan: 'free', devices_used: 1, devices_limit: 2, bytes_used: 0, bytes_limit: 31457280 } }),
       'GET /v1/devices': () => ({ json: { devices: [{ device_id: 'd1', name: 'Obsidian', scope: 'full', last_seen_at: Date.now() }] } }),
     });
     p.settings.device_id = 'd1';
@@ -866,7 +866,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     q.tab.containerEl = anything();
     let fails = true;
     q.api = async (m, path) => {
-      if (path === '/v1/me') { if (fails) throw new Error('offline'); return { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 }; }
+      if (path === '/v1/me') { if (fails) throw new Error('offline'); return { plan: 'free', devices_used: 1, devices_limit: 2, bytes_used: 0, bytes_limit: 31457280 }; }
       return path === '/v1/devices' ? { devices: [] } : {};
     };
     window.setTimeout = (fn, ms) => { timers.push(ms); return 0; };    // hold the retry timer
@@ -876,7 +876,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     q.setStatus('live');
     await settle();
     window.setTimeout = (fn, ms) => { timers.push(ms); setImmediate(fn); return 0; };
-    ok('the connection coming back re-reads the account at once', /^Free · 1 of 3 devices/.test(q.tab.stateSetting.desc), q.tab.stateSetting.desc);
+    ok('the connection coming back re-reads the account at once', /^Free · 1 of 2 devices/.test(q.tab.stateSetting.desc), q.tab.stateSetting.desc);
   }
 
   console.log('── Connecting, not "disconnected" ──');
@@ -1682,7 +1682,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     const { p } = await makePlugin();
     ui.names.length = 0; ui.buttons.length = 0;
     p.tab.containerEl = anything();
-    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 });
+    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 2, bytes_used: 0, bytes_limit: 31457280 });
     p.tab.display();
     for (let i = 0; i < 10; i++) await settle();
     const T = X.STRINGS.en;
@@ -1753,7 +1753,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     // the settings page: a heading and one line, no controls, no look for agents
     ui.names.length = 0; ui.buttons.length = 0; ui.toggles.length = 0;
     p.tab.containerEl = anything();
-    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 });
+    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 2, bytes_used: 0, bytes_limit: 31457280 });
     p.tab.display();
     for (let i = 0; i < 10; i++) await settle();
     const A = X.STRINGS.en.agents;
@@ -2665,7 +2665,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
   {
     const { p } = await makePlugin({ token: 'dk_x', momentsCheckedAt: 0, lastPlan: 'free', lastPaidUntil: 0 });
     p.sync = async () => 0; p.connect = () => {}; p.refreshEndpoints = () => {};
-    const calls = serve({ 'GET /v1/me': () => ({ json: { plan: 'free', devices_used: 1, devices_limit: 3 } }) });
+    const calls = serve({ 'GET /v1/me': () => ({ json: { plan: 'free', devices_used: 1, devices_limit: 2 } }) });
     await p.start();
     ok('the time of the check is kept even when nothing in the account changed', p.settings.momentsCheckedAt > 0 && p.stored.momentsCheckedAt === p.settings.momentsCheckedAt && calls.filter((c) => c.path === '/v1/me').length === 1, JSON.stringify([p.stored.momentsCheckedAt, calls.map((c) => c.path)]));
     const again = await makePlugin(undefined, JSON.parse(JSON.stringify(p.stored)));
@@ -2742,7 +2742,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     const { p } = await makePlugin();
     p.detect = async () => FOUND;
     p.tab.containerEl = anything();
-    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 3, bytes_used: 0, bytes_limit: 31457280 });
+    p.api = async (method, path) => (path === '/v1/devices' ? { devices: [] } : { plan: 'free', devices_used: 1, devices_limit: 2, bytes_used: 0, bytes_limit: 31457280 });
     const reset = () => { ui.names.length = 0; ui.buttons.length = 0; ui.toggles.length = 0; ui.dropdowns.length = 0; ui.opened.length = 0; };
     const draw = async () => { reset(); thenCalls = 0; p.tab.display(); for (let i = 0; i < 10; i++) await settle(); };
     await draw();
