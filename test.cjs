@@ -2926,6 +2926,16 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       && X.targetsSummary(['d_a', 'd_b'], [...receiversOf, { device_id: 'd_z', name: 'Z' }]) === '2 devices' && X.targetsSummary(['d_a', 'd_b'], null) === '2 devices' && X.targetsSummary([], null) === 'All');
     ok('…in Chinese too (全部 / 名字 / N 台)', Z.set.allDevices === '全部' && Z.set.deviceN(3) === '3 台' && Z.set.delivery === '投递' && Z.set.defaultTo === '默认投给' && Z.set.selectAll === '全选');
 
+    // every slot in use: which device the new one replaces
+    const full = { plan: 'free', devices_used: 4, devices_limit: 4 };
+    ok('slots: room left, nothing is picked', X.slotPlan(ME, devs, 'd_me').pick === null && X.slotPlan(ME, devs, 'd_me').full === false);
+    ok('slots: full, the one idle longest is picked — a send-only device counts, this vault never does', X.slotPlan(full, devs, 'd_me').pick?.device_id === 'd_b' && X.slotPlan(full, devs, 'd_me').others.every((d) => d.device_id !== 'd_me'));
+    ok('slots: a chosen device is honoured, an unknown choice falls back to the idle one', X.slotPlan(full, devs, 'd_me', 'd_a').pick?.device_id === 'd_a' && X.slotPlan(full, devs, 'd_me', 'd_zzz').pick?.device_id === 'd_b');
+    ok('slots: a removed device is not offered', X.slotPlan(full, [...devs, { device_id: 'd_x', name: 'Old', last_seen_at: 1, revoked_at: 5 }], 'd_me').pick?.device_id === 'd_b');
+    ok('slots: full with nothing else to replace — no pick (no code is made)', (() => { const r = X.slotPlan({ devices_used: 1, devices_limit: 1 }, [devs[0]], 'd_me'); return r.full && r.pick === null; })());
+    ok('slots: an account that could not be read is treated as having room', X.slotPlan(null, devs, 'd_me').pick === null);
+    ok('slots: words in both languages (name in quotes, a way to change it, nothing to pick, upgrade)', T.slotFull(2, 'Linux').includes('Linux') && Z.slotFull(2, 'Linux').includes('「Linux」') && !!T.slotChange && !!Z.slotChange && !!T.slotNone && !!Z.slotNone && !!T.slotUpgrade && !!Z.slotUpgrade);
+
     // the settings page
     const mk = async (settings, list = devs) => {
       const r = await makePlugin({ device_id: 'd_me', ...settings });

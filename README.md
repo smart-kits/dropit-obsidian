@@ -41,7 +41,7 @@ The plugin is one device of one account; the other devices are other dropit clie
 
 **Joining each of them:** *Settings → dropit → Add a device* shows a 6-character code and a QR code, valid 5 minutes. Type it on the other device, or scan
 the QR code with its camera (on an iPhone it opens the shortcut's setup with the code filled in). The first device creates the account;
-every other one joins with a code like this.
+every other one joins with a code like this. When every device slot is in use, the code comes with a line saying which device the new one will replace (the one idle longest; *Replace a different one* picks another), and with no device to replace it shows no code and points to the device list to remove one first.
 
 **A good setup:** send from your phone with the shortcut (iPhone) or the app (Android), from the browser with the extension; receive everything here as notes.
 To read what you sent from this computer on your phone, put the plugin on Obsidian mobile too, or open the web inbox.

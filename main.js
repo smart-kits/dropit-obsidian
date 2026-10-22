@@ -645,6 +645,10 @@ const STRINGS = {
     codeValid: (min) => `Valid for ${min} min · copied`,
     codeInstall: ['Not installed on the new device yet? Scan the QR code with it, or open ', ' to install, then enter these 6 characters.'],
     codeExpired: 'Expired — generate a new one',
+    slotFull: (limit, name) => `All ${limit} device slots are in use — the new device will replace “${name}” when it joins.`,
+    slotChange: 'Replace a different one',
+    slotNone: 'All device slots are in use. Remove one in the device list below first.',
+    slotUpgrade: 'Or upgrade to Paid',
     deviceJoined: 'dropit: a new device joined',
     thisDevice: 'this device',
     lastSeen: (when) => `last seen ${when}`,
@@ -975,6 +979,10 @@ const STRINGS = {
     codeValid: (min) => `${min} 分钟内有效 · 已复制`,
     codeInstall: ['新设备还没装 dropit？用它扫上面的二维码，或打开 ', ' 去安装，装好后输入这 6 位。'],
     codeExpired: '已过期，请重新生成',
+    slotFull: (limit, name) => `${limit} 台设备的名额已满，新设备加入时替换「${name}」。`,
+    slotChange: '换一台',
+    slotNone: '名额已满，先在下面的设备列表里移除一台。',
+    slotUpgrade: '或升级到付费版',
     deviceJoined: 'dropit：新设备已加入',
     thisDevice: '本机',
     lastSeen: (when) => `${when}在线`,
@@ -2512,9 +2520,9 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     } catch { return false; }
   }
 
-  /** The account as the service describes it, read at most once in ten minutes; null when it can't be read */
-  async accountNow() {
-    if (this.meCache && Date.now() - this.meCache.at < 600_000) return this.meCache.m;
+  /** The account as the service describes it, read at most once in ten minutes (`fresh`: read it now); null when it can't be read */
+  async accountNow(fresh = false) {
+    if (!fresh && this.meCache && Date.now() - this.meCache.at < 600_000) return this.meCache.m;
     try {
       const m = await this.api('GET', '/v1/me');
       this.meCache = { m, at: Date.now() };
@@ -3079,6 +3087,19 @@ function trialDaysOf(m, plans) {
  * empty means every device, and then a send carries no `to` (so a device added later gets it too).
  */
 const cleanTargets = (v) => [...new Set((Array.isArray(v) ? v : []).filter((x) => typeof x === 'string' && x))];
+/**
+ * Every slot in use: a new device takes the place of another one, picked before the code is made so joining stays one
+ * step on the other device. The pick defaults to the one idle longest and can be changed. This vault is never offered,
+ * and neither is a removed device; a send-only device is, because it holds a slot too.
+ * @returns {{ full: boolean, others: object[], pick: object|null }} full: no slot is free; pick is null when there is room or nothing to replace
+ */
+function slotPlan(me, devices, selfId, chosen) {
+  const others = (devices ?? []).filter((d) => d && d.device_id !== selfId && !d.revoked_at)
+    .sort((a, b) => (a.last_seen_at ?? 0) - (b.last_seen_at ?? 0));
+  const full = Number.isFinite(me?.devices_limit) && Number.isFinite(me?.devices_used) && me.devices_used >= me.devices_limit;
+  return { full, others, pick: full ? (others.find((d) => d.device_id === chosen) ?? others[0] ?? null) : null };
+}
+
 /** The devices a send can reach: full access (a send-only one receives nothing), not removed, not this one */
 const receivers = (list, selfId) => (list ?? []).filter((d) => d && d.device_id !== selfId && d.scope !== 'ingest_only' && !d.revoked_at);
 /**
@@ -4664,12 +4685,23 @@ class DropitSettingTab extends PluginSettingTab {
   }
 
   /** The code big, the QR next to it, a countdown, and a quiet check for the new device joining */
-  async showCode(box) {
+  async showCode(box, chosen) {
     const p = this.plugin;
+    // Every slot in use: the new device replaces one, chosen now (by default the one idle longest). Both are read fresh: a stale count would replace a device that didn't need to go
+    const [me, list] = await Promise.all([p.accountNow(true), p.api('GET', '/v1/devices').then((r) => r.devices ?? []).catch(() => null)]);
+    const plan = slotPlan(me, list, p.settings.device_id, chosen);
+    if (plan.full && list && !plan.pick) {
+      box.empty();
+      box.toggle(true);
+      box.createDiv({ cls: 'setting-item-description', text: t.slotNone });
+      this.upgradeLine(box, me);
+      return;
+    }
     const [{ code, expires_at }, before] = await Promise.all([
-      p.api('POST', '/v1/pair'),
+      p.api('POST', '/v1/pair', plan.pick ? { replace: plan.pick.device_id } : undefined),
       p.api('GET', '/v1/me').then((m) => m.devices_used).catch(() => null),
     ]);
+    const beforeIds = plan.pick ? new Set(list.map((d) => d.device_id)) : null;
     navigator.clipboard?.writeText(code).catch(() => {});
     box.empty();
     box.toggle(true);
@@ -4677,6 +4709,21 @@ class DropitSettingTab extends PluginSettingTab {
     const side = box.createDiv();
     side.createDiv({ cls: 'dropit-code', text: code });      // exactly what to type: no dash to skip over
     const hint = side.createDiv({ cls: 'setting-item-description' });
+    if (plan.pick) {
+      const slot = side.createDiv({ cls: 'setting-item-description' });
+      slot.createSpan({ text: `${t.slotFull(me.devices_limit, plan.pick.name)} ` });
+      if (plan.others.length > 1) {
+        const change = slot.createEl('a', { text: t.slotChange, href: '#' });
+        change.addEventListener('click', (e) => {
+          e.preventDefault();
+          const sel = slot.createEl('select', { cls: 'dropdown' });
+          for (const d of plan.others) sel.createEl('option', { text: d.name, value: d.device_id }).selected = d.device_id === plan.pick.device_id;
+          change.remove();
+          sel.addEventListener('change', () => this.run(() => this.showCode(box, sel.value), false));
+        });
+      }
+      this.upgradeLine(side, me);
+    }
     // Where the new device gets dropit, said next to the code it will need: a link that opens here, so nothing has to be typed
     const install = side.createDiv({ cls: 'setting-item-description' });
     install.appendText(t.codeInstall[0]);
@@ -4688,9 +4735,12 @@ class DropitSettingTab extends PluginSettingTab {
       const left = expires_at - Date.now();
       if (left <= 0) { hint.setText(t.codeExpired); return void window.clearInterval(this.pairTimer); }
       hint.setText(t.codeValid(Math.max(1, Math.ceil(left / 60_000))));
-      if (before == null || ++ticks % 4) return;       // every 4 s
-      const m = await p.api('GET', '/v1/me').catch(() => null);
-      if (m && m.devices_used > before) {
+      if ((before == null && !beforeIds) || ++ticks % 4) return;       // every 4 s
+      // Replacing keeps the count where it was: watch for a device that wasn't there when the code was made
+      const joined = beforeIds
+        ? await p.api('GET', '/v1/devices').then((r) => (r.devices ?? []).some((d) => !beforeIds.has(d.device_id))).catch(() => false)
+        : await p.api('GET', '/v1/me').then((m) => m.devices_used > before).catch(() => false);
+      if (joined) {
         window.clearInterval(this.pairTimer);
         new Notice(t.deviceJoined);
         this.display();
@@ -4700,6 +4750,15 @@ class DropitSettingTab extends PluginSettingTab {
     this.pairTimer = window.setInterval(tick, 1_000);
     p.registerInterval(this.pairTimer);
     tick();
+  }
+
+  /** A quiet "or upgrade" link under the full-slots note: only when the account came with an upgrade link (free account, payments on) */
+  upgradeLine(parent, me) {
+    const url = upgradeLink(me);
+    if (!url) return;
+    const line = parent.createDiv({ cls: 'setting-item-description' });
+    const a = line.createEl('a', { text: t.slotUpgrade, href: url });
+    a.addEventListener('click', (e) => { e.preventDefault(); window.open(url); });
   }
 
   devices(list) {
@@ -4990,7 +5049,7 @@ class RulePicker extends FuzzySuggestModal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { pool, byteGate, batchDocument, errorText, apiError, errorNotice, linkNotice, safeLink, upgradeLink, trialDaysOf, trialFacts, paidEndingIn, solvePow, powChallengeOk, dkhOf, deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl, cleanTargets, receivers, reconcileTargets, targetsSummary, Confirm });
+Object.assign(module.exports, { pool, byteGate, batchDocument, errorText, apiError, errorNotice, linkNotice, safeLink, upgradeLink, trialDaysOf, trialFacts, paidEndingIn, solvePow, powChallengeOk, dkhOf, deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl, cleanTargets, receivers, reconcileTargets, targetsSummary, slotPlan, Confirm });
 Object.assign(module.exports, {
   // the runner block
   RUNNER_VERSION, RUN_DEFAULTS, RUN_KINDS, RUN_AGENTS, agentEnv, safeFileName, linkHost, planRun, composeInput, sanitizeAnswer, detectAgents, runHandler,
