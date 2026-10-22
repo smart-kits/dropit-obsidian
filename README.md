@@ -127,8 +127,8 @@ When items arrive, one notice says how many — click it to open the last one.
 - **A flaky network is ridden out.** A connection dropped on the way (a proxy, patchy Wi-Fi) is tried again
   before it counts; a failed sync retries on its own.
 - **A file that won't download doesn't block the rest.** A line takes its place:
-  `⚠️ report.pdf (820 KB) couldn't be downloaded: … Settings → dropit → Advanced → Pull again tries once more.`
-- **Pull again** (*Settings → dropit → Advanced*): everything, the last N items, or the last N days. What's already in
+  `⚠️ report.pdf (820 KB) couldn't be downloaded: … Settings → dropit → Pull again tries once more.`
+- **Pull again** (*Settings → dropit → Receiving*, last row): everything, the last N items, or the last N days. What's already in
   the vault is skipped, failed downloads are fetched again. With *A new note for each*, a note you deleted
   comes back; in the other two modes, what you deleted stays deleted.
 - A newly joined device starts with what's sent after it joined; *Pull again* fetches what came before,
@@ -136,7 +136,7 @@ When items arrive, one notice says how many — click it to open the last one.
 
 ## Process what arrives with an AI agent or a command
 
-*Settings → dropit → Handle automatically after it arrives → AI processing* hands what arrives to a command line AI agent already
+*Settings → dropit → Receiving → After it arrives → AI processing* hands what arrives to a command line AI agent already
 installed on your computer, or to a command of your own. A received text or link becomes **one note: what was sent,
 quoted, then the result**.
 
@@ -242,7 +242,7 @@ Some things people set up this way. These are your own setups, not features of d
 
 ## Run your own command after each item
 
-*Settings → dropit → Handle automatically after it arrives → Run an Obsidian command* picks any Obsidian command — a QuickAdd macro, a
+*Settings → dropit → Receiving → After it arrives → Run an Obsidian command* picks any Obsidian command — a QuickAdd macro, a
 Templater script, another plugin's action. It runs once for each item, **after** the item is in the vault.
 (To hand items to an AI agent you don't need this: see *Process what arrives with an AI agent* above. The two work together: this runs first, and if it changes the note, the AI's result is written beside it instead of replacing it.)
 
@@ -298,9 +298,10 @@ module.exports = async ({ app }) => {
   seconds (it does a small calculation on your computer, nothing is sent for it) and then carries on by itself.
   If that doesn't work, it asks you to create the account in the browser instead.
 - **Free to use; an optional paid plan raises the limits.** Everything described here works on the free plan, within its limits:
-  30 items a day, files up to 10 MB, items kept for 1 day, 3 devices, and real-time delivery for the first 10 days
+  20 items a day, files up to 10 MB, items kept for 1 day, 3 devices, and real-time delivery for the first 14 days
   after signing up. After that, new items come in when Obsidian opens, when you come back to its window, or when you
-  click *Sync now*.
+  click *Sync now*. The plugin tells you once when the real-time period is about to end and once when it has ended
+  (what you used it for, and what changes), and once when a paid year is about to end or has ended. Nothing else is shown.
 - **Payment.** The paid plan costs $19.90 a year (the first month is $1.90), $29.90 for one year paid once, or $49.90 once for lifetime (limited), plus local tax:
   300 items a day, files up to 100 MB, 10 devices, items kept 10 days, real-time delivery always on.
   You pay on the website ([pricing](https://dropit.smart-kits.xyz/#pricing)), never inside the plugin, and the plugin works the same
@@ -328,7 +329,7 @@ module.exports = async ({ app }) => {
 2. **Join.** *Settings → dropit* opens on *Join with a pairing code*. On a device you already use, show a
    code (web inbox: *Devices*; terminal: `dropit code`), type its 6 characters, press *Join*.
    Your first device ever? *First time using dropit? → Create a new account*.
-3. **Add your other devices from here.** *Settings → dropit → Add a device → Generate a pairing code*:
+3. **Add your other devices from here.** *Settings → dropit → Devices → Add a device → Generate a pairing code*:
    type the code on the new device, or scan the QR code with its camera. The code is copied for you,
    and the page notices when the device has joined.
 
@@ -345,14 +346,13 @@ Ask me which vault and before creating an account, and never show or commit my t
 | Setting | What it does |
 |---|---|
 | *(top line)* | The connection state and your account: plan · devices · space · how long items are kept. *Sync now* next to it |
-| **Receiving** | *Write items as* · *Folder* · *Note*: where items land (above) |
-| **Handle automatically after it arrives** | Two separate rows, either or both: *AI processing* (desktop only; with *Try it* beside the switch, and below it the agent, what to handle (with *Keep the original note* at the end of that row), the prompt, the prompt, then the limits and the command, both folded) · *Run an Obsidian command* |
-| **Devices** | *Add a device* (a pairing code and its QR code) · every device on your account (*Remove* stops one right away) · a link to the install page |
-| **Advanced** | *Pull again* · *Server address* (only if you were given another one; the built-in is always tried last) · *Unpair* |
+| **Receiving** | *Write items as* · *Folder* · *Note*: where items land (above). Then a part called *After it arrives*, with two separate rows, either or both: *AI processing* (desktop only; with *Try it* beside the switch, and below it the agent, what to handle (with *Keep the original note* at the end of that row), the prompt, then the limits and the command, both folded) · *Run an Obsidian command*. *Pull again* is the last row |
+| **Sending** | *Send to*: one checkbox per other device that can receive. All ticked (the default) sends to all your devices, including ones you add later; tick fewer to send only to those. It is saved the moment you tick, on this computer only (in this plugin's `data.json`), and at least 1 device stays ticked. A device you removed is taken off the next time the page opens, with a notice; if every chosen device is gone the default goes back to all. The commands, the file menu and *Send N files* all follow it. Not shown while no other device can receive yet |
+| **Devices** | *Add a device* (a pairing code and its QR code) · every device on your account (*Remove* stops one right away) · a link to the install page · *Unpair* at the end, in red: it asks first, and then this computer leaves the account (the other devices are not affected; pairing again is how you come back) |
+| **Advanced** | *Server address* (only if you were given another one; the built-in is always tried last). Before you are paired this is the only other group besides the pairing rows |
 | *(bottom)* | *Report a problem* (a new public issue with your versions filled in) · *Source code* |
 
 Each group folds and says how it is set while folded. Explanations live behind the small (i) next to a name: hover it, or click it where there is no hover.
-| Advanced → Unpair | Removes this vault from your account (freeing its device slot) and forgets its sign-in; your settings stay |
 
 The interface follows Obsidian's language: English, or Simplified Chinese when Obsidian is set to Chinese.
 
@@ -365,7 +365,7 @@ The interface follows Obsidian's language: English, or Simplified Chinese when O
 | *Device limit reached* | Your plan's device count is used up | Remove a device you no longer use (*Settings → dropit → Devices*) |
 | *Pairing code expired* | Codes last 5 minutes and work once | Generate a new one |
 | *Real-time trial ended* | New accounts get real-time for a while; after that it syncs when you open or come back to Obsidian | Nothing to fix — click the status bar to sync any time |
-| `⚠️ … couldn't be downloaded` in a note | The file didn't come down this time | *Settings → dropit → Advanced → Pull again* |
+| `⚠️ … couldn't be downloaded` in a note | The file didn't come down this time | *Settings → dropit → Pull again* |
 
 Anything else: the *Report a problem* link at the bottom of *Settings → dropit* (a public issue). For questions about your account you'd rather not post publicly, email [support@dropit.smart-kits.xyz](mailto:support@dropit.smart-kits.xyz).
 

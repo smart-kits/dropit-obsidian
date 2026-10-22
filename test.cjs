@@ -32,7 +32,7 @@ const anything = () => new Proxy(function () {}, {
   set: (target, key, v) => { target[key] = v; return true; },
 });
 let thenCalls = 0;
-const ui = { names: [], buttons: [], toggles: [], dropdowns: [], opened: [] };    // what the settings page and its modals drew, and what can be clicked
+const ui = { names: [], buttons: [], toggles: [], dropdowns: [], opened: [], checks: [], links: [] };    // what the settings page and its modals drew, and what can be clicked
 /** A button or toggle that remembers its handler, so a test can press it */
 const control = (rec) => {
   const c = anything();
@@ -45,7 +45,15 @@ const control = (rec) => {
 };
 /** Like Obsidian's: chainable, with a then(cb) that calls back with itself — which makes every Setting a thenable */
 class Setting {
-  constructor() { this.settingEl = anything(); }
+  constructor() {
+    this.settingEl = anything();
+    // Obsidian's controlEl: a row can put its own element in it (a checkbox, a link); the page's handlers are kept so a test can fire them
+    this.controlEl = { createEl: (tag, o = {}) => {
+      const rec = { name: this.name, tag, ...o, checked: false, shown: true, on: {}, addEventListener(ev, fn) { rec.on[ev] = fn; }, setAttribute() {}, toggle(v) { rec.shown = v; }, setText() {} };
+      (tag === 'input' ? ui.checks : ui.links).push(rec);
+      return rec;
+    } };
+  }
   setName(n) { this.name = n; ui.names.push(n); return this; }
   setDesc(d) { this.desc = d; return this; }
   setHeading() { return this; }
@@ -675,9 +683,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
   {
     const { p, files } = await makePlugin();
     const calls = serve({
-      'POST /v1/ingest/blob/': () => ({ json: { seq: 71 } }),
-      'POST /v1/ingest/blob': () => ({ json: { seq: -5, upload_url: 'https://dropit.smart-kits.xyz/v1/ingest/blob/-5/upload?sig=x' } }),
-      'PUT /v1/ingest/blob/-5/upload': () => ({ json: { seq: 71 } }),
+      'POST /v1/ingest/file': () => ({ json: { seq: 71 } }),
       'POST /v1/ingest': () => ({ json: { seq: 70 } }),
     });
     await p.sendText('https://example.com/x');
@@ -686,13 +692,16 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     files.set('Pics/a.png', PNG);
     calls.length = 0;
     await p.sendFiles([{ path: 'Notes/idea.md', name: 'idea.md', extension: 'md' }, { path: 'Pics/a.png', name: 'a.png', extension: 'png' }]);
-    const [note, start, put, done] = calls;
+    // They go a few at a time, so which request is first is not fixed
+    const note = calls.find((c) => c.path === '/v1/ingest');
+    const up = calls.find((c) => c.path.startsWith('/v1/ingest/file?'));
     ok('a note goes as its text', JSON.parse(note.body).raw === '# Idea\nbody' && JSON.parse(note.body).kind === 'text');
     const g1 = JSON.parse(note.body).meta.group;
-    const g2 = JSON.parse(start.body).group;
-    ok('both in one batch', g1.id === g2.id && g1.n === 2 && g1.i === 1 && g2.i === 2, JSON.stringify([g1, g2]));
-    ok('the image is uploaded: start, PUT its bytes, done', JSON.parse(start.body).kind === 'image' && JSON.parse(start.body).size === 4
-      && put.method === 'PUT' && put.contentType === 'image/png' && done.path === '/v1/ingest/blob/-5/done', JSON.stringify(calls.map((c) => c.method + c.path)));
+    const q = new URL(`https://x${up.path}`).searchParams;
+    const g2 = { id: q.get('group'), i: Number(q.get('i')), n: Number(q.get('n')) };
+    ok('both in one batch', g1.id === g2.id && g1.n === 2 && g1.i === 1 && g2.i === 2 && g2.n === 2, JSON.stringify([g1, g2]));
+    ok('the image is uploaded in ONE request: its bytes as the body, its type, and its name and source in the address', calls.length === 2 && up.method === 'POST' && up.contentType === 'image/png'
+      && Buffer.from(up.body).equals(PNG) && q.get('name') === 'a.png' && q.get('source') === 'obsidian', JSON.stringify(calls.map((c) => c.method + c.path)));
     ok('one notice for both', notices.at(-1) === 'dropit: sent 2 items', notices.at(-1));
     serve({ 'POST /v1/ingest': () => ({ status: 409, json: { error: 'DEDUPED', seq: 70 } }) });
     await p.sendText('again');
@@ -929,21 +938,179 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
   {
     const { p } = await makePlugin();
     let asked = 0;
+    const ME = { plan: 'free', trial_days: 14 };     // the length of the trial is the service's to say
     p.api = async (m, path) => {
       if (path === '/v1/ws/ticket') { asked++; throw Object.assign(new Error('paid'), { code: 'WS_REQUIRES_PAID' }); }
-      return {};
+      return path === '/v1/me' ? ME : {};
     };
     notices.length = 0;
     await p.connect();
     ok('asks for a ticket once', asked === 1, String(asked));
     ok('remembers that real-time is not included', p.noRealtime === true && p.state === 'manual', p.state);
-    ok('says so once, mentioning the 10-day trial', notices.length === 1 && /10/.test(notices[0]), JSON.stringify(notices));
+    ok('says so once, mentioning the trial\'s length the service gave', notices.length === 1 && new RegExp(String(ME.trial_days)).test(notices[0]) && !/\b10\b/.test(notices[0]), JSON.stringify(notices));
     p.heartbeat(); p.heartbeat();
     await settle();
     ok('heartbeats stop asking (every one used to)', asked === 1, String(asked));
     p.noRealtime = false;
     await p.connect();
     ok('asking again later does not repeat the notice', notices.length === 1, JSON.stringify(notices));
+  }
+
+  console.log('── Upgrade moments: numbers from the service, notices once, links tagged ──');
+  {
+    const T = DropitPlugin;
+    const DAY = 86_400_000;
+    const UP = 'https://dropit.example/upgrade?u=1&s=2&why=account&buy=year';
+    const free = (extra = {}) => ({ plan: 'free', trial_days: 14, created_at: Date.now() - 12 * DAY - 1000, items_total: 41, devices_used: 2, upgrade_url: UP, ...extra });
+    const sockety = () => { globalThis.WebSocket = class { constructor() { this.readyState = 1; } close() {} send() {} }; };
+
+    // upgrade_url gets its source; the hourly limit is never sold; unsafe links stay dropped
+    ok('upgradeLink tags the source at the end', T.upgradeLink({ upgrade_url: UP }) === `${UP}&src=obsidian`, T.upgradeLink({ upgrade_url: UP }));
+    ok('…a link with no query gets ?src', T.upgradeLink({ upgrade_url: 'https://dropit.example/upgrade' }) === 'https://dropit.example/upgrade?src=obsidian');
+    ok('…the hourly limit has no link', T.upgradeLink({ upgrade_url: UP, window: 'hour' }) === null);
+    ok('…nor an unsafe or missing one', T.upgradeLink({ upgrade_url: 'javascript:alert(1)' }) === null && T.upgradeLink({}) === null && T.upgradeLink(undefined) === null);
+    {
+      notices.length = 0;
+      T.errorNotice('dropit: today is used up', { data: { upgrade_url: UP, why: 'per_day' } });
+      ok('a limit Notice carries the tagged link', lastNotice.m.links[0].href === `${UP}&src=obsidian`, JSON.stringify(lastNotice.m.links));
+      T.errorNotice('dropit: slow down', { data: { upgrade_url: UP, why: 'per_day', window: 'hour' } });
+      ok('…and the hourly one only the text', typeof lastNotice.m === 'string', JSON.stringify(lastNotice.m));
+    }
+
+    // The trial's length: the account first, then the plans, then its two dates, else no number at all
+    ok('trial length: from the account', T.trialDaysOf({ trial_days: 14 }, { limits: { free: { realtimeTrialDays: 9 } } }) === 14);
+    ok('…else from the plans', T.trialDaysOf({}, { limits: { free: { realtimeTrialDays: 9 } } }) === 9);
+    ok('…else from the account\'s two dates', T.trialDaysOf({ created_at: 0, realtime_until: 7 * DAY }, null) === 7);
+    ok('…else nothing: no number is written', T.trialDaysOf({}, null) === null && T.trialDaysOf(null, null) === null);
+    ok('what the account has had: only what it said', JSON.stringify(T.trialFacts({}, 14)) === JSON.stringify({ days: 0, items: 0, devices: 0 }));
+    ok('…the first day counts as 1, and it stops at the trial\'s length', T.trialFacts({ created_at: Date.now() - 100 }, 14).days === 1 && T.trialFacts({ created_at: Date.now() - 30 * DAY }, 14).days === 14);
+
+    for (const lang of ['en', 'zh']) {
+      const S = T.STRINGS[lang];
+      const f = { days: 12, items: 41, devices: 2 };
+      ok(`${lang}: "what you had" says days, items and devices`, /12/.test(S.enjoyed(f)) && /41/.test(S.enjoyed(f)) && /2/.test(S.enjoyed(f)), S.enjoyed(f));
+      ok(`${lang}: no items sent: that half is left out`, !/41|\b0\b/.test(S.enjoyed({ ...f, items: 0 })) && /12/.test(S.enjoyed({ ...f, items: 0 })), S.enjoyed({ ...f, items: 0 }));
+      ok(`${lang}: one device: that half is left out`, S.enjoyed({ ...f, devices: 1 }).replace(/12|41/g, '').search(/\d/) === -1, S.enjoyed({ ...f, devices: 1 }));
+      for (const key of ['noRealtime', 'trialOver', 'trialEnding']) {
+        ok(`${lang}: ${key} carries the length it is given, and none when it has none`, S[key](14).includes('14') && !/\d{2}/.test(S[key](null)), `${S[key](14)} | ${S[key](null)}`);
+      }
+      ok(`${lang}: the day count of the countdown line comes from the caller`, S.trialSoon(S.daysLeft(3), 14).includes('14') && !/\d{2}/.test(S.trialSoon(S.daysLeft(0), null)), S.trialSoon(S.daysLeft(3), 14));
+    }
+
+    // T3: the trial ended — says what the account had, with the link when payments are open, once
+    {
+      const { p } = await makePlugin();
+      let meReads = 0;
+      p.api = async (m, path) => { if (path === '/v1/me') { meReads++; return free(); } return {}; };
+      p.realtimeUntil = Date.now() - 1000;
+      notices.length = 0;
+      await p.stopRealtime('trial_over', undefined, Object.assign(new Error('over'), { data: { reason: 'trial_over' } }));
+      ok('T3: says it ended, the trial\'s length, and what the account had', notices.length === 1 && /14-day/.test(notices[0]) && /41 items/.test(notices[0]) && /2 devices/.test(notices[0]), JSON.stringify(notices));
+      ok('T3: Paid keeps it on, and the link is tagged with this client', /Paid keeps real-time/.test(notices[0]) && lastNotice.m.links[0].href === `${UP}&src=obsidian`, JSON.stringify(lastNotice.m.links));
+      ok('T3: the notice is remembered per period in the settings', Object.keys(p.stored.moments).some((k) => k.startsWith('T3.')), JSON.stringify(p.stored.moments));
+      await p.stopRealtime('trial_over', undefined, null);
+      ok('T3: not said again', notices.length === 1, JSON.stringify(notices));
+    }
+    {
+      // payments closed: the service gives no link, so there is no link and no Paid sentence — only the facts
+      const { p } = await makePlugin();
+      p.api = async (m, path) => (path === '/v1/me' ? free({ upgrade_url: null }) : {});
+      notices.length = 0;
+      await p.stopRealtime('trial_over', undefined, null);
+      ok('T3, payments closed: facts only — no link, no Paid sentence', notices.length === 1 && typeof lastNotice.m === 'string' && !/Paid/.test(notices[0]) && /41 items/.test(notices[0]), JSON.stringify(notices));
+    }
+    {
+      // the account can't be read: the same notice, without any number and without a link
+      const { p } = await makePlugin();
+      p.api = async () => { throw new Error('offline'); };
+      notices.length = 0;
+      await p.stopRealtime('trial_over', undefined, null);
+      ok('T3, account unreadable: no number, no link, still said', notices.length === 1 && !/\d/.test(notices[0]) && typeof lastNotice.m === 'string', JSON.stringify(notices));
+    }
+    {
+      // a paid account is told nothing about the free plan
+      const { p } = await makePlugin();
+      p.api = async (m, path) => (path === '/v1/me' ? { plan: 'paid', paid_until: Date.now() + 100 * DAY, renews: true } : {});
+      notices.length = 0;
+      await p.stopRealtime('trial_over', undefined, null);
+      ok('a paid account hears nothing about the trial', notices.length === 0, JSON.stringify(notices));
+    }
+
+    // T1 (three days out) and T2 (under a day): once each, in order, T2 the already-existing "less than a day" line
+    {
+      const { p } = await makePlugin();
+      sockety();
+      p.sync = async () => {};
+      p.api = async (m, path) => (path === '/v1/ws/ticket' ? { ticket: 't', realtime_until: Date.now() + 2.5 * DAY } : path === '/v1/me' ? free() : {});
+      await p.connect();
+      p.socket.onopen();
+      notices.length = 0;
+      p.heartbeat(); p.heartbeat();
+      await settle();
+      ok('T1: with 3 days or less left, says so once, with what the account had', notices.length === 1 && /3 days left/.test(notices[0]) && /14 days/.test(notices[0]) && /41 items/.test(notices[0]), JSON.stringify(notices));
+      p.realtimeUntil = Date.now() + 3 * 3_600_000;
+      p.heartbeat(); p.heartbeat();
+      await settle();
+      ok('T2: under a day is its own notice, once, keeping the old wording and the service\'s length', notices.length === 2 && /less than a day/.test(notices[1]) && /14 days/.test(notices[1]) && /41 items/.test(notices[1]), JSON.stringify(notices));
+      ok('T1 and T2 are remembered separately', Object.keys(p.stored.moments).some((k) => k.startsWith('T1.')) && Object.keys(p.stored.moments).some((k) => k.startsWith('T2.')), JSON.stringify(p.stored.moments));
+      p.unloaded = true;
+    }
+    {
+      // no items sent yet, one device: both halves left out, the notice still says it
+      const { p } = await makePlugin();
+      sockety();
+      p.sync = async () => {};
+      p.api = async (m, path) => (path === '/v1/ws/ticket' ? { ticket: 't', realtime_until: Date.now() + 3 * 3_600_000 } : path === '/v1/me' ? free({ items_total: 0, devices_used: 1 }) : {});
+      await p.connect();
+      p.socket.onopen();
+      notices.length = 0;
+      p.heartbeat();
+      await settle();
+      ok('T2: nothing sent and one device: neither half is written', notices.length === 1 && !/ 0 |items sent|devices receiving/.test(notices[0]) && /12 days|13 days/.test(notices[0]), JSON.stringify(notices));
+      p.unloaded = true;
+    }
+    {
+      // the local record can't be written: the notice stays silent rather than repeat
+      const { p } = await makePlugin();
+      p.api = async (m, path) => (path === '/v1/me' ? free() : {});
+      p.saveData = async () => { throw new Error('disk full'); };
+      notices.length = 0;
+      await p.stopRealtime('trial_over', undefined, null).catch(() => {});
+      ok('the record can\'t be written: no notice (silent beats repeating)', notices.length === 0, JSON.stringify(notices));
+    }
+
+    // P1 / P2: paid ending, paid ended
+    {
+      const { p } = await makePlugin();
+      const until = Date.now() + 5 * DAY;
+      const paid = { plan: 'paid', paid_until: until, renews: false, paid_kind: 'year', items_total: 500 };
+      p.api = async (m, path) => (path === '/v1/me' ? paid : {});
+      notices.length = 0;
+      await p.accountMoments(paid);
+      ok('P1: a paid year with under a week left says when it ends, once', notices.length === 1 && /Paid runs until \d{4}-\d{2}-\d{2}/.test(notices[0]) && !/\d+ items a day/.test(notices[0]), JSON.stringify(notices));
+      await p.accountMoments(paid);
+      ok('P1: not again for the same end', notices.length === 1, JSON.stringify(notices));
+      ok('P1: the settings page line shows the date', /Paid until \d{4}-\d{2}-\d{2}/.test(T.STRINGS.en.account({ ...paid, devices_used: 1, devices_limit: 10, bytes_used: 0, bytes_limit: 1048576 })), 'account line');
+      await p.accountMoments({ ...paid, renews: true, paid_until: Date.now() + 2 * DAY });
+      ok('P1: a plan that renews itself: nothing', notices.length === 1, JSON.stringify(notices));
+      await p.accountMoments({ ...paid, paid_until: Date.now() + 30 * DAY });
+      ok('P1: more than a week away: nothing', notices.length === 1, JSON.stringify(notices));
+      ok('the paid state is remembered for P2', p.stored.lastPlan === 'paid' && Number.isFinite(p.stored.lastPaidUntil), JSON.stringify([p.stored.lastPlan, p.stored.lastPaidUntil]));
+      const endedAt = Date.now() - 1000;
+      const gone = { plan: 'free', paid_until: endedAt, paid_grace_until: endedAt + 10 * DAY, items_total: 500, upgrade_url: UP };
+      notices.length = 0;
+      await p.accountMoments(gone);
+      ok('P2: Paid just ended: one notice with the account\'s total, the end of the grace and a tagged renew link', notices.length === 1 && /Paid has ended/.test(notices[0]) && /500 items in total/.test(notices[0]) && lastNotice.m.links[0].href === `${UP}&src=obsidian`, JSON.stringify(notices));
+      await p.accountMoments(gone);
+      ok('P2: once', notices.length === 1, JSON.stringify(notices));
+    }
+    {
+      // refund or a plan that never was paid: free with no grace — nothing
+      const { p } = await makePlugin({ lastPlan: 'paid', lastPaidUntil: 1 });
+      notices.length = 0;
+      await p.accountMoments({ plan: 'free', paid_until: 1, paid_grace_until: null });
+      ok('P2: no grace period (refunded, or never paid): nothing is said', notices.length === 0, JSON.stringify(notices));
+    }
   }
 
   console.log('── Real-time trial: countdown, end, full for today ──');
@@ -963,6 +1130,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
 
     p.realtimeUntil = Date.now() + 3 * 3_600_000;
     p.heartbeat(); p.heartbeat();
+    await settle();
     ok('less than a day left: warns once', notices.length === 1 && /less than a day/.test(notices[0]) && p.trialLeft() === 'less than a day left', JSON.stringify(notices));
 
     // The end by the local clock: ask the server rather than conclude — the user may have upgraded meanwhile
@@ -1291,7 +1459,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     const { p, vault } = await makePlugin();
     let reads = 0;
     vault.readBinary = async () => { reads++; return new ArrayBuffer(8); };
-    serve({ 'POST /v1/ingest/blob': () => ({ status: 413, json: { error: 'PAYLOAD_TOO_LARGE', field: 'size', limit: 5 << 20 } }) });
+    serve({ 'POST /v1/ingest/file': () => ({ status: 413, json: { error: 'PAYLOAD_TOO_LARGE', field: 'size', limit: 5 << 20 } }) });
     notices.length = 0;
     await p.sendFiles([{ path: 'big.mov', name: 'big.mov', extension: 'mov', stat: { size: 900 << 20 } }]);
     ok('a file too large is refused before it is read into memory', reads === 0 && notices.some((n) => /big\.mov/.test(n)), `${reads} ${JSON.stringify(notices)}`);
@@ -1948,6 +2116,342 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('the AI fails: the received text is still in its note, as it arrived, and no second note appears', f.p.runs[0]?.ok === false && !!kept && kept[1].includes(LONG) && !kept[1].includes('boom') && resultsIn(f.files).length === 0, `${f.p.runs[0]?.why} · ${[...f.files.keys()].join()}`);
   }
 
+  console.log('── Auto-processing: a batch is handled once, when it is all here ──');
+  {
+    // The wait of a batch is a timer the test holds and fires itself; every other timer runs at once as before
+    const held = [];
+    const keep = { set: globalThis.window.setTimeout, clear: globalThis.window.clearTimeout };
+    let nextId = 1000;
+    const hold = () => {
+      held.length = 0;
+      globalThis.window.setTimeout = (fn, ms) => {
+        if (!String(fn).includes('batchTimeout')) return keep.set(fn, ms);
+        const h = { id: ++nextId, fn, ms, live: true };
+        held.push(h);
+        return h.id;
+      };
+      globalThis.window.clearTimeout = (id) => { const h = held.find((x) => x.id === id); if (h) h.live = false; };
+    };
+    const release = () => { globalThis.window.setTimeout = keep.set; globalThis.window.clearTimeout = keep.clear; };
+    const live = () => held.filter((h) => h.live);
+    const fire = async (p) => { for (const h of live()) { h.live = false; h.fn(); } for (let i = 0; i < 20; i++) await settle(); await p.hookQueue; };
+    // The runs that really started an agent (a skip is not one)
+    const started = (p) => p.runs.filter((r) => r.kind === 'batch' && !String(r.why ?? '').startsWith('skipped:'));
+    const ID = 'bBATCH0001';
+    const grp = (i, n, id = ID) => ({ group: { id, i, n } });
+    const bt = (seq, raw, i, n, id) => text(seq, raw, { meta: grp(i, n, id) });
+    const bi = (seq, name, i, n, id) => blob(seq, name, { meta: { filename: name, ...grp(i, n, id) } });
+    const rule = (extra = {}) => fakeRule({ keepSource: false, mode: 'auto', prompt: 'MODE:stdin', ...extra });
+    const link = (made) => {
+      made.metadataCache.getFirstLinkpathDest = (l) => { const hit = [...made.files.keys()].find((k) => k === l || k.endsWith(`/${l}`)); return hit ? { path: hit, name: l } : null; };
+    };
+    const setup = async (items, settings = {}, r = rule()) => {
+      const made = await makePlugin({ ...agentsOf([r]), ...settings });
+      link(made);
+      serve({ 'GET /v1/pull': pages(...items), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      return made;
+    };
+    const pull = async (p) => { await p.sync(false); for (let i = 0; i < 20; i++) await settle(); await p.hookQueue; };
+    // What the agent was sent, as the stand-in gives it back inside the answer
+    const answerOf2 = (content) => content.split('\n\n---\n\n').slice(1).join('\n\n---\n\n');
+
+    // ── four items, in two pulls: one run, with all four ──
+    hold();
+    {
+      const { p, files, fm } = await setup([[bt(500, 'compare these MODE:stdin', 1, 4), bi(501, 'a.png', 2, 4)], [bi(502, 'b.png', 3, 4), bi(503, 'c.png', 4, 4)]]);
+      await pull(p);
+      ok('half a batch: nothing has run, it is waiting, and its clock is set for 90 s', started(p).length === 0 && resultsIn(files).length === 0
+        && p.settings.batchRuns[ID]?.state === 'wait' && p.settings.batchRuns[ID].seen.length === 2 && live().length === 1 && live()[0].ms === 90_000, JSON.stringify([p.settings.batchRuns, held.map((h) => h.ms)]));
+      await pull(p);
+      const notes = notesIn(files);
+      ok('the rest arrives: it runs at once (the clock was not needed), once, and the clock is gone', started(p).length === 1 && live().length === 0 && p.settings.batchRuns[ID].state === 'done', JSON.stringify([p.runs, p.settings.batchRuns]));
+      ok('one note and no note beside it', notes.length === 1 && resultsIn(files).length === 0, [...files.keys()].join());
+      const note = files.get(notes[0]);
+      const answer = answerOf2(note);
+      ok('the agent got all four in the one run: the words and the three files', answer.includes('compare these') && answer.includes('items="4"') && ['a.png', 'b.png', 'c.png'].every((n) => answer.includes(`file ./${n}`)), answer);
+      ok('…as one message (the line we write says so)', /sent together in one message/.test(answer));
+      const head = note.slice(0, note.indexOf('\n\n---\n\n'));
+      ok('what arrived stays exactly as it was above the line (words, then the three files embedded)', head.endsWith('compare these MODE:stdin\n\n![[a.png]]\n\n![[b.png]]\n\n![[c.png]]'), JSON.stringify(note));
+      ok('front matter is as it was: the four numbers and the batch', JSON.stringify(fm.get(notes[0]).dropit_seq) === '[500,501,502,503]' && fm.get(notes[0]).dropit_batch === ID && note.startsWith('---\n'), JSON.stringify(fm.get(notes[0])));
+      const once = note;
+      serve({ 'GET /v1/pull': pages([bt(500, 'compare these MODE:stdin', 1, 4), bi(501, 'a.png', 2, 4), bi(502, 'b.png', 3, 4), bi(503, 'c.png', 4, 4)]), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await p.repull('all');
+      for (let i = 0; i < 20; i++) await settle();
+      await p.hookQueue;
+      ok('pulling it all again changes nothing and runs nothing', files.get(notes[0]) === once && started(p).length === 1 && notesIn(files).length === 1, JSON.stringify(p.runs));
+    }
+
+    // ── short of its count: nothing runs until the clock says so; then with what is here; later ones are not run ──
+    hold();
+    {
+      const { p, files } = await setup([[bt(510, 'three of four MODE:stdin', 1, 4), bi(511, 'a.png', 2, 4), bi(512, 'b.png', 3, 4)], [bi(513, 'c.png', 4, 4)]]);
+      await pull(p);
+      ok('three of four: it waits (nothing run, three counted)', started(p).length === 0 && p.settings.batchRuns[ID].state === 'wait' && p.settings.batchRuns[ID].seen.length === 3 && live().length === 1);
+      await fire(p);
+      const note = files.get(notesIn(files)[0]);
+      ok('the clock ends the wait: one run, with the three that are here', started(p).length === 1 && p.settings.batchRuns[ID].state === 'done' && note.includes('items="3"') && !note.includes('file ./c.png'), note);
+      ok('…and the answer went under them, in the note', /!\[\[b\.png\]\]\n\n---\n\n/.test(note) && resultsIn(files).length === 0, note);
+      const answered = note;
+      await pull(p);
+      const after = files.get(notesIn(files)[0]);
+      ok('the fourth comes late: it joins the note, is not run, and the run record says so', started(p).length === 1 && after.includes('![[c.png]]') && after.startsWith(answered.slice(0, 40))
+        && p.runs.some((r) => r.why === 'skipped:late') && resultsIn(files).length === 0, JSON.stringify([p.runs, after]));
+      ok('…and what was answered is still there, not written over', after.includes('items="3"') && after.includes('SUMMARY') === answered.includes('SUMMARY'));
+    }
+
+    // ── a batch whose items were sent in another order than they arrive: handed over as it was sent ──
+    hold();
+    {
+      const { p, files } = await setup([[bi(520, 'd.png', 4, 4), bi(521, 'b.png', 2, 4), bt(522, 'the words MODE:stdin', 1, 4), bi(523, 'c.png', 3, 4)]]);
+      await pull(p);
+      const notes = notesIn(files);
+      const note = files.get(notes[0]);
+      ok('the note keeps them in the order they arrived and were written (by seq)', /!\[\[d\.png\]\]\n\n!\[\[b\.png\]\]\n\nthe words MODE:stdin\n\n!\[\[c\.png\]\]/.test(note), JSON.stringify(note));
+      const answer = answerOf2(note);
+      const at = (s) => answer.indexOf(s);
+      ok('the agent gets the words, then the files in the order they were sent (b, c, d)', at('the words') >= 0 && at('file ./b.png') > at('the words') && at('file ./c.png') > at('file ./b.png') && at('file ./d.png') > at('file ./c.png'), answer);
+      // With only the note left (by hand, or after a restart) the order they were sent in is still known while the record is kept
+      const payload = await p.payloadOfNote({ path: notes[0], name: '', extension: 'md' });
+      ok('read back from the note, a batch is in the order it was sent while it is remembered', same(payload.files, ['Inbox/b.png', 'Inbox/c.png', 'Inbox/d.png']) && payload.text === 'the words MODE:stdin' && payload.parts[0].text != null, JSON.stringify(payload.parts));
+      delete p.settings.batchRuns[ID];
+      const plain = await p.payloadOfNote({ path: notes[0], name: '', extension: 'md' });
+      ok('…and with nothing remembered, as the note has them', same(plain.files, ['Inbox/d.png', 'Inbox/b.png', 'Inbox/c.png']), JSON.stringify(plain.files));
+    }
+    {
+      const { p } = await setup([[]]);
+      const m = (seq, t, index) => ({ seq, kind: 'text', text: t, files: [], batch: { id: 'b', index, count: 3 }, meta: {} });
+      const nums = await p.batchOf([m(90, 'B', 2), m(91, 'A', 1), m(92, 'C', 3)], { note: 'Inbox/n.md', shared: false });
+      ok('by the number each carries, whatever the seq (90 does not outrank 1)', nums.text === 'A\n\nB\n\nC' && same(nums.seqs, [91, 90, 92]), JSON.stringify(nums.seqs));
+      const unnumbered = await p.batchOf([m(50, 'x', undefined), m(49, 'y', undefined), m(48, 'z', 1)], { note: 'Inbox/n.md', shared: false });
+      ok('items without a number are never put before or after one by comparing a seq with a number', unnumbered.parts.length === 3 && unnumbered.seqs.length === 3, JSON.stringify(unnumbered.seqs));
+    }
+
+    // ── the person edits the note while the agent works: the answer goes beside it ──
+    hold();
+    {
+      const { p, files } = await setup([[bt(540, 'edit me MODE:stdin', 1, 2), bi(541, 'a.png', 2, 2)]]);
+      const readFiles = p.readFiles.bind(p);
+      let mine = null;
+      p.readFiles = async (...a) => { const path = notesIn(files)[0]; mine = `${files.get(path)}\nMY OWN LINE\n`; files.set(path, mine); return readFiles(...a); };
+      await pull(p);
+      const notes = notesIn(files);
+      ok('a note changed during the run is not touched; the answer is one note beside it', notes.length === 1 && files.get(notes[0]) === mine && resultsIn(files).length === 1, [...files.keys()].join());
+      const beside = files.get(resultsIn(files)[0]);
+      ok('…which holds what arrived, a line, then the answer', beside.includes('edit me MODE:stdin\n\n![[a.png]]') && /\n\n---\n\n/.test(beside) && beside.includes('items="2"'), beside);
+      p.readFiles = readFiles;
+    }
+
+    // ── "keep the source" on: the note stays, and there is one note beside it ──
+    hold();
+    {
+      const { p, files } = await setup([[bt(550, 'keep me MODE:stdin', 1, 2), bi(551, 'a.png', 2, 2)]], {}, rule({ keepSource: true }));
+      await pull(p);
+      const notes = notesIn(files);
+      ok('the source is exactly what arrived, and one answer is beside it', notes.length === 1 && !files.get(notes[0]).includes('items=') && resultsIn(files).length === 1 && started(p).length === 1, [...files.keys()].join());
+      ok('…named after the note and the rule, with no number', /^Inbox\/09-17 08\.00 keep me MODE_stdin · Fake\.md$/.test(resultsIn(files)[0]) || / · Fake\.md$/.test(resultsIn(files)[0]), resultsIn(files).join());
+      ok('…and the answer is under the original, with its picture embedded', files.get(resultsIn(files)[0]).includes('keep me MODE:stdin\n\n![[a.png]]\n\n---\n\n'), files.get(resultsIn(files)[0]));
+    }
+
+    // ── a shared note (append) is never changed: one answer beside it, named by the numbers ──
+    hold();
+    {
+      const { p, files } = await setup([[bt(560, 'shared MODE:stdin', 1, 2), bi(561, 'a.png', 2, 2)]], { mode: 'append', appendPath: 'Inbox/dropit.md' });
+      await pull(p);
+      const res = resultsIn(files);
+      ok('append mode: one answer, named with the range of numbers, and the shared note has no answer in it', res.length === 1 && /\(560–561\)\.md$/.test(res[0]) && !files.get('Inbox/dropit.md').includes('items='), JSON.stringify([res, started(p).length]));
+    }
+
+    // ── what the rule is not ticked for is not handed over; a link is text ──
+    hold();
+    {
+      const { p, files } = await setup([[bt(570, 'see https://x.example/p MODE:stdin', 1, 3), blob(571, 'v.mp4', { kind: 'video', meta: { filename: 'v.mp4', mime: 'video/mp4', ...grp(2, 3) } }), bi(572, 'a.png', 3, 3)]], {}, rule({ kinds: ['text', 'image'] }));
+      await pull(p);
+      const answer = answerOf2(files.get(notesIn(files)[0]));
+      ok('a video the rule was not ticked for is left out of what the agent gets', started(p).length === 1 && answer.includes('file ./a.png') && !answer.includes('v.mp4'), answer);
+      const plan = X.planRun({ ...rule(), agent: 'claude', argv: undefined }, X.narrowBatch(rule(), { kind: 'batch', parts: [{ kind: 'text', text: 'a' }, { kind: 'url', text: 'https://x.example/' }], text: 'a', files: [] }));
+      ok('a link inside a batch does not open a page: no web mode', plan.run && plan.mode === 'think', JSON.stringify(plan));
+    }
+
+    // ── nothing runs by itself: nothing waits ──
+    hold();
+    for (const [name, agents] of [['no rule', { handlers: [] }], ['paused', { paused: true }], ['not confirmed', { consented: false }], ['rule off', { handlers: [rule({ enabled: false })] }]]) {
+      const made = await makePlugin({ agents: { v: 1, consented: true, paused: false, handlers: [rule()], ...agents } });
+      serve({ 'GET /v1/pull': pages([bt(580, 'x MODE:stdin', 1, 2), bi(581, 'a.png', 2, 2)]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await pull(made.p);
+      ok(`${name}: the batch is not put down to wait for, no clock is set, nothing runs`, Object.keys(made.p.settings.batchRuns).length === 0 && live().length === 0 && started(made.p).length === 0 && resultsIn(made.files).length === 0, JSON.stringify(made.p.settings.batchRuns));
+    }
+    {
+      platform.isDesktopApp = false;
+      const made = await makePlugin({ agents: { v: 1, consented: true, paused: false, handlers: [rule()] } });
+      serve({ 'GET /v1/pull': pages([bt(582, 'x MODE:stdin', 1, 2), bi(583, 'a.png', 2, 2)]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await pull(made.p);
+      platform.isDesktopApp = true;
+      ok('on a phone: nothing waits and nothing runs', Object.keys(made.p.settings.batchRuns).length === 0 && live().length === 0 && started(made.p).length === 0 && notesIn(made.files).length === 1);
+    }
+    {
+      // paused before the clock rings: the run is skipped, and says so
+      const { p, files } = await setup([[bt(584, 'x MODE:stdin', 1, 3), bi(585, 'a.png', 2, 3)]]);
+      await pull(p);
+      p.settings.agents.paused = true;
+      await fire(p);
+      ok('paused while it waited: nothing runs when the clock rings, and the run record says why', started(p).length === 0 && resultsIn(files).length === 0 && p.settings.batchRuns[ID].state === 'done' && p.runs.some((r) => r.why === 'skipped:disabled'), JSON.stringify(p.runs));
+    }
+
+    // ── numbers that disagree: the first item's count stands ──
+    hold();
+    {
+      const { p, files } = await setup([[bt(590, 'count MODE:stdin', 1, 2), bi(591, 'a.png', 2, 5)]]);
+      await pull(p);
+      ok('the first item\'s count is the one used: two of two runs at once', p.settings.batchRuns[ID].count === 2 && started(p).length === 1 && live().length === 0 && resultsIn(files).length === 0);
+    }
+
+    // ── an item whose download failed counts as here (no waiting for it), and is said to the agent ──
+    hold();
+    {
+      const made = await setup([[bt(600, 'one is lost MODE:stdin', 1, 2), bi(601, 'gone.png', 2, 2)]]);
+      serve({ 'GET /v1/pull': pages([bt(600, 'one is lost MODE:stdin', 1, 2), bi(601, 'gone.png', 2, 2)]), 'GET /601': () => new Error('no network') });
+      await pull(made.p);
+      const note = made.files.get(notesIn(made.files)[0]);
+      ok('a file that did not come: the run is not held back, and the agent is told how many did not come', started(made.p).length === 1 && live().length === 0 && answerOf2(note).includes('1 file could not be fetched'), note);
+      serve({ 'GET /v1/pull': pages([bi(601, 'gone.png', 2, 2)]), 'GET /601': () => ({ bytes: PNG_BYTES() }), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+      await made.p.repull('all').catch(() => {});
+      for (let i = 0; i < 20; i++) await settle();
+      await made.p.hookQueue;
+      ok('fetching it later does not run the batch again', started(made.p).length === 1, JSON.stringify(made.p.runs));
+    }
+
+    // ── a failed run leaves the note, is said once, and is not tried again ──
+    hold();
+    {
+      const { p, files } = await setup([[bt(610, 'x', 1, 2), bi(611, 'a.png', 2, 2)]], {}, rule({ prompt: 'MODE:fail' }));
+      await pull(p);
+      const note = files.get(notesIn(files)[0]);
+      ok('the note is as it arrived (no line, no answer in it), and no note beside it', !/\n---\n\n/.test(note.replace(/^---\n[\s\S]*?\n---\n/, '')) && resultsIn(files).length === 0, note);
+      ok('…one failed run is recorded and the batch is done: no second try', p.runs.filter((r) => r.why === 'exit:3').length === 1 && p.settings.batchRuns[ID].state === 'done');
+    }
+
+    // ── a pile of batches after being away: whole batches are counted, the newest few are run ──
+    hold();
+    {
+      const items = [];
+      for (let b = 0; b < 5; b++) items.push(bt(700 + b * 2, `pile ${b} MODE:stdin`, 1, 2, `bPILE000${b}`), bi(701 + b * 2, `p${b}.png`, 2, 2, `bPILE000${b}`));
+      const { p, files } = await setup([items], { agents: { v: 1, consented: true, paused: false, handlers: [rule()], recent: 3 } });
+      await pull(p);
+      const ran = notesIn(files).filter((k) => files.get(k).includes('items="2"'));
+      ok('five whole batches arrive at once, the newest three are run (not three items)', ran.length === 3 && started(p).length === 3 && ran.every((k) => !/pile 0|pile 1/.test(files.get(k).split('\n\n---\n\n')[0])), JSON.stringify([notesIn(files), p.runs.length]));
+      ok('…and the two that were not run leave no record of waiting', ['bPILE0000', 'bPILE0001'].every((id) => !(id in p.settings.batchRuns)), Object.keys(p.settings.batchRuns).join());
+    }
+
+    // ── restarted while waiting: the wait starts again, and then the note is all there is ──
+    hold();
+    {
+      const first = await setup([[bt(620, 'restart me MODE:stdin', 1, 3), bi(621, 'a.png', 2, 3)]]);
+      await pull(first.p);
+      const stored = JSON.parse(JSON.stringify(first.p.stored));
+      ok('what waits is saved with the settings', stored.batchRuns?.[ID]?.state === 'wait' && stored.batchRuns[ID].seen.length === 2, JSON.stringify(stored.batchRuns));
+      hold();
+      const clone = (o) => JSON.parse(JSON.stringify(o));
+      const again = await makePlugin(undefined, clone(stored));
+      for (const [k, v] of first.files) again.files.set(k, v);
+      for (const [k, v] of first.fm) again.fm.set(k, v);
+      link(again);
+      again.p.batchResume();
+      await settle();
+      ok('after a restart it waits again, in full, and has not run', started(again.p).length === 0 && live().length === 1 && live()[0].ms === 90_000, JSON.stringify(held));
+      await fire(again.p);
+      const note = again.files.get(notesIn(again.files)[0]);
+      ok('when the clock rings it runs from the note, once, with the words and the file', started(again.p).length === 1 && answerOf2(note).includes('restart me') && answerOf2(note).includes('file ./a.png') && again.p.settings.batchRuns[ID].state === 'done', note);
+      // what was running when Obsidian closed is not run again
+      const mid = await makePlugin(undefined, clone({ ...stored, batchRuns: { [ID]: { ...stored.batchRuns[ID], state: 'running' } } }));
+      mid.p.batchResume();
+      ok('a batch that was running when it closed is counted done, not run again', mid.p.settings.batchRuns[ID].state === 'done' && live().length === 0 && started(mid.p).length === 0);
+      // a shared note cannot be taken apart again
+      const shared = await makePlugin(undefined, clone({ ...stored, batchRuns: { [ID]: { ...stored.batchRuns[ID], note: null } } }));
+      shared.p.batchResume();
+      ok('a batch in a shared note is let go on restart, and the run record says so', shared.p.settings.batchRuns[ID].state === 'done' && live().length === 0 && shared.p.runs.some((r) => r.why === 'skipped:restart'));
+    }
+    release();
+  }
+
+  console.log('── Auto-processing: a batch note that was answered before ──');
+  {
+    const ID = 'bAGAIN0001';
+    const made = await makePlugin(agentsOf([fakeRule({ enabled: false, auto: false, mode: 'auto', prompt: 'MODE:stdin' })]));
+    const { p, files, fm, metadataCache } = made;
+    metadataCache.getFirstLinkpathDest = (link) => (files.has(`Inbox/${link}`) ? { path: `Inbox/${link}`, name: link } : null);
+    files.set('Inbox/a.png', Buffer.from('png'));
+    files.set('Inbox/late.png', Buffer.from('png'));
+    const FRONT = `---\nkind: batch\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_batch: ${ID}\ndropit_seq: [801, 802]\n---\n`;
+    const original = '\nthe words\n\n![[a.png]]\n';
+    const answered = `${FRONT}${original}\n---\n\nFIRST RESULT line one\n\n---\n\nFIRST RESULT after its own rule\n\n— [A Post](https://example.com/post)\n`;
+    const path = 'Inbox/09-17 08.00 again.md';
+    files.set(path, answered);
+    fm.set(path, { kind: 'batch', source: 'web', created: '2026-09-17T08:00:00.000Z', dropit_batch: ID, dropit_seq: [801, 802] });
+    const file = { path, name: '09-17 08.00 again.md', extension: 'md' };
+    const d = await p.payloadOfNote(file);
+    ok('a batch note: handed over as a batch with all its files (not as text)', d.kind === 'batch' && same(d.files, ['Inbox/a.png']) && d.batch.id === ID && d.batch.count === 2 && d.seq === 801, JSON.stringify(d));
+    ok('an answer written into it before is not part of what arrived: only what is above the line', d.text === 'the words' && !JSON.stringify(d).includes('FIRST RESULT'), JSON.stringify(d));
+    ok('…and the page it came from stays with it', d.meta.from?.url === 'https://example.com/post' && d.original.includes('— [A Post]') && !d.original.includes('FIRST RESULT'), JSON.stringify(d.original));
+    const hand = await p.processWith(p.settings.agents.handlers[0], d, { manual: true });
+    for (let i = 0; i < 5; i++) await settle();
+    const beside = resultsIn(files);
+    ok('by hand it writes one new note beside it, and does not touch the note', hand.ok && beside.length === 1 && files.get(path) === answered, JSON.stringify([hand, beside]));
+    const out = files.get(beside[0]);
+    ok('…whose original is what arrived, not the answer from before', out.split('\n\n---\n\n')[0].includes('the words\n\n![[a.png]]') && !out.split('\n\n---\n\n')[0].includes('FIRST RESULT'), out);
+    ok('…and the agent was handed the words and the picture, and not the answer from before', out.includes('items="2"') && out.includes('file ./a.png') && !out.includes('FIRST RESULT'), out);
+    // a file that came after the answer (a late item) is still part of the batch; a note never answered is whole
+    files.set(path, answered.replace('\n\n— [A Post]', '\n\n![[late.png]]\n\n— [A Post]'));
+    const late = await p.payloadOfNote(file);
+    ok('a file embedded after the answer (it came late) still goes with the batch', same(late.files, ['Inbox/a.png', 'Inbox/late.png']) && !JSON.stringify(late).includes('FIRST RESULT'), JSON.stringify(late.files));
+    files.set(path, `${FRONT}${original}`);
+    const fresh = await p.payloadOfNote(file);
+    ok('a note that was never answered is read whole', fresh.text === 'the words' && same(fresh.files, ['Inbox/a.png']) && fresh.original === 'the words\n\n![[a.png]]', JSON.stringify(fresh));
+    // by hand again: a second answer gets a number, never replaces the first
+    await p.processWith(p.settings.agents.handlers[0], fresh, { manual: true });
+    ok('a second time by hand is a second note with a number', resultsIn(files).length === 2 && resultsIn(files).some((k) => / 2\.md$/.test(k)), resultsIn(files).join());
+  }
+
+  console.log('── Auto-processing: the invisible line that marks where an answer starts ──');
+  {
+    const ID = 'bMARK00001';
+    const MARK = '<!-- dropit:answer -->';
+    const made = await makePlugin(agentsOf([fakeRule({ enabled: false, auto: false, mode: 'auto', prompt: 'MODE:stdin' })]));
+    const { p, files, fm, metadataCache } = made;
+    metadataCache.getFirstLinkpathDest = (link) => (files.has(`Inbox/${link}`) ? { path: `Inbox/${link}`, name: link } : null);
+    files.set('Inbox/a.png', Buffer.from('png'));
+    const FRONT = `---\nkind: batch\nsource: web\ncreated: 2026-09-17T08:00:00.000Z\ndropit_batch: ${ID}\ndropit_seq: [811, 812]\n---\n`;
+    const path = 'Inbox/09-17 08.00 marked.md';
+    fm.set(path, { kind: 'batch', source: 'web', created: '2026-09-17T08:00:00.000Z', dropit_batch: ID, dropit_seq: [811, 812] });
+    const file = { path, name: '09-17 08.00 marked.md', extension: 'md' };
+    const ownText = 'part one\n\n---\n\npart two after its own rule';
+    const before = `${FRONT}\n${ownText}\n\n![[a.png]]\n`;
+    files.set(path, before);
+    ok('appendAnswer writes the rule, the marker line, then the answer; front matter untouched', await p.appendAnswer(path, 'THE ANSWER\n\n---\n\nsecond part', before)
+      && files.get(path) === `${before.trimEnd()}\n\n---\n\n${MARK}\n\nTHE ANSWER\n\n---\n\nsecond part\n` && files.get(path).startsWith(FRONT), files.get(path));
+    const answeredNote = files.get(path);
+    const d = await p.payloadOfNote(file);
+    ok('what the person wrote has a rule of its own: it is all still what arrived, and the answer is not', d.text === ownText && same(d.files, ['Inbox/a.png']) && !JSON.stringify(d).includes('THE ANSWER') && !JSON.stringify(d).includes('second part\\n'), JSON.stringify(d));
+    ok('…its original ends where the person ended it, with no rule dropit added', d.original === `${ownText}\n\n![[a.png]]`, JSON.stringify(d.original));
+    files.set(path, `${FRONT}\nthe words\n\n![[a.png]]\n\n---\n\nOLD ANSWER\n\n---\n\nmore of it\n`);
+    const old = await p.payloadOfNote(file);
+    ok('a note with no marker (written before) is cut at its first rule, as before', old.text === 'the words' && same(old.files, ['Inbox/a.png']) && !JSON.stringify(old).includes('OLD ANSWER') && !JSON.stringify(old).includes('more of it'), JSON.stringify(old));
+    files.set(path, `${answeredNote.trimEnd()}\n\n---\n\n${MARK}\n\nSECOND ANSWER\n`);
+    const two = await p.payloadOfNote(file);
+    ok('two answers in a note: only what is above the first marker arrived', two.text === ownText && !JSON.stringify(two).includes('ANSWER'), JSON.stringify(two));
+    // a late member lands above the rule, in what arrived, and is handed over
+    files.set(path, answeredNote);
+    await p.addMember({ path, kind: 'note' }, { seq: 813, kind: 'text', raw: 'a late thought', source: 'web', created_at: '2026-09-17T08:01:00.000Z', meta: {} });
+    const note = files.get(path);
+    ok('a late text goes above the answer, not under it', note.indexOf('a late thought') > 0 && note.indexOf('a late thought') < note.indexOf(MARK) && note.indexOf('a late thought') < note.indexOf('THE ANSWER'), note);
+    ok('…and the answer is as it was, once, with its marker', note.endsWith(`\n\n---\n\n${MARK}\n\nTHE ANSWER\n\n---\n\nsecond part\n`) && note.split(MARK).length === 2 && note.startsWith(FRONT), note);
+    const lateD = await p.payloadOfNote(file);
+    ok('by hand later, the late text is part of what is handed over and the answer is not', lateD.text.startsWith(ownText) && lateD.text.endsWith('a late thought') && !JSON.stringify(lateD).includes('THE ANSWER') && same(lateD.files, ['Inbox/a.png']), JSON.stringify(lateD));
+    const hand = await p.processWith(p.settings.agents.handlers[0], lateD, { manual: true });
+    for (let i = 0; i < 5; i++) await settle();
+    const beside = resultsIn(files);
+    ok('…and what the agent was given holds it', hand.ok && beside.length === 1 && files.get(beside[0]).includes('a late thought') && !files.get(beside[0]).includes('THE ANSWER'), JSON.stringify([hand, beside.map((k) => files.get(k))]));
+  }
+
   console.log('── Auto-processing: by hand ──');
   {
     const { p, files, fm, metadataCache } = await makePlugin(agentsOf([fakeRule({ enabled: false, auto: false })]));
@@ -1968,7 +2472,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     const c = await p.payloadOfNote(imgNote);
     ok('a file note: no text, its file, its name and type', c.kind === 'image' && c.text === '' && same(c.files, ['Inbox/budget.png']) && c.meta.filename === 'budget.png' && c.meta.mime === 'image/png', JSON.stringify(c));
     const d = await p.payloadOfNote(batchNote);
-    ok('a batch note: its words, its file, its first number', d.kind === 'text' && d.text === 'the words' && d.seq === 373 && same(d.files, ['Inbox/budget.png']) && d.batch.id === 'bXXXX', JSON.stringify(d));
+    ok('a batch note: its words, its file, its first number — one batch, so the picture goes to the agent too', d.kind === 'batch' && d.text === 'the words' && d.seq === 373 && same(d.files, ['Inbox/budget.png']) && d.batch.id === 'bXXXX' && d.batch.count === 2 && d.parts.length === 2, JSON.stringify(d));
     ok('a note that did not come through dropit is not processed', (await p.payloadOfNote(plain)) === null);
 
     // process-note: the rule is run on the open note — a rule that is off and by-hand-only still runs on purpose
@@ -2021,7 +2525,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     await draw();
     ok('a desktop with no rule: one switch to turn it on, and nothing more to set yet', ui.toggles.some((x) => x.name === U.ai && x.value === false) && !ui.names.includes(U.agent) && !ui.names.includes(U.command) && thenCalls < 50, ui.names.join('|'));
     ok('the pairing code box says where the new device gets dropit, in both languages, around a link', [X.STRINGS.en, X.STRINGS.zh].every((l) => Array.isArray(l.codeInstall) && l.codeInstall.length === 2 && l.codeInstall[0].length > 15) && /^https:\/\/dropit\.smart-kits\.xyz\/#install$/.test(X.INSTALL_URL));
-    ok('…the groups: receiving, after it arrives, devices, advanced — in this order, each with a name', ['receiving', 'after', 'devices', 'advanced'].every((k) => U[k] && X.STRINGS.zh.set[k]));
+    ok('…the groups: receiving (with "after it arrives" as its second part), sending, devices, advanced — each with a name', ['receiving', 'after', 'delivery', 'devices', 'advanced'].every((k) => U[k] && X.STRINGS.zh.set[k]));
     const turnOn = ui.toggles.find((x) => x.name === U.ai);
     const turning = turnOn.change(true);
     await settle(); await settle();
@@ -2044,7 +2548,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     await draw();
     ok('with the rule: the agent, its command, what to handle, keep the original, try it — and the Obsidian command under them', [U.agent, U.handle, U.runCommand].every((n) => ui.names.includes(n)) && ui.buttons.some((x) => x.text === U.tryButton), ui.names.join('|'));
     ok('…the Obsidian command is a row of its own, beside the AI switch (not one of its options): both can be on', ui.names.includes(U.ai) && ui.names.includes(U.runCommand) && /either, both, or neither/.test(U.runCommandTip) && /都开/.test(X.STRINGS.zh.set.runCommandTip));
-    ok('…the group is named for what it does', X.STRINGS.zh.set.after === '收到之后自动处理');
+    ok('…its part inside Receiving is named for when it happens', X.STRINGS.zh.set.after === '收到之后');
     rule.enabled = false;
     await draw();
     ok('switched off: the AI\'s rows fold away (no agent, command, boxes, try) while the Obsidian command stays', ui.toggles.some((x) => x.name === U.ai && x.value === false) && ![U.agent, U.handle].some((n) => ui.names.includes(n)) && !ui.buttons.some((x) => x.text === U.tryButton) && ui.names.includes(U.runCommand), ui.names.join('|'));
@@ -2172,6 +2676,219 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('commandOf finds the command a rule would start, for the first-time confirmation', same(X.commandOf(claude, { bin: '/c/claude' }).argv.slice(0, 2), ['/c/claude', '-p']) && X.commandOf({ ...claude, kinds: [] }, {}).argv === null);
   }
 
+
+  console.log('── Sending: who a send goes to by default ──');
+  {
+    const T = X.STRINGS.en;
+    const U = T.set;
+    const Z = X.STRINGS.zh;
+    const devs = [
+      { device_id: 'd_me', name: 'My Mac', scope: 'full', last_seen_at: Date.now() },
+      { device_id: 'd_a', name: 'Pixel', scope: 'full', last_seen_at: Date.now() - 180_000 },
+      { device_id: 'd_b', name: 'Linux', scope: 'full', last_seen_at: Date.now() - 86_400_000 },
+      { device_id: 'd_c', name: 'Shortcut', scope: 'ingest_only', last_seen_at: Date.now() },
+    ];
+    const ME = { plan: 'free', devices_used: 4, devices_limit: 10, bytes_used: 0, bytes_limit: 31457280 };
+    const receiversOf = X.receivers(devs, 'd_me');
+
+    // the pure parts: who can be picked, and what is left of a saved default
+    ok('who can be picked: full access, not removed, not this vault — a send-only device and this vault are left out', same(receiversOf.map((d) => d.device_id), ['d_a', 'd_b'])
+      && X.receivers([...devs, { device_id: 'd_x', name: 'Old', scope: 'full', revoked_at: 1 }], 'd_me').length === 2);
+    ok('a saved default is cleaned: only ids, no repeats, anything else is nothing', same(X.cleanTargets(['d_a', 'd_a', '', 5, null]), ['d_a']) && same(X.cleanTargets('d_a'), []) && same(X.cleanTargets(undefined), []));
+    ok('the saved default meets the devices that are there: the part that still exists is kept', same(X.reconcileTargets(['d_a', 'd_gone'], receiversOf), { ids: ['d_a'], gone: 1 }));
+    ok('…none of it left: back to all (empty), and it says how many went', same(X.reconcileTargets(['d_gone', 'd_old'], receiversOf), { ids: [], gone: 2 }));
+    ok('…naming every device is "all" (empty); nothing saved is nothing lost', same(X.reconcileTargets(['d_b', 'd_a'], receiversOf), { ids: [], gone: 0 }) && same(X.reconcileTargets([], receiversOf), { ids: [], gone: 0 }));
+    ok('the folded line: All, the device\'s name, or how many', X.targetsSummary([], receiversOf) === 'All' && X.targetsSummary(['d_a'], receiversOf) === 'Pixel'
+      && X.targetsSummary(['d_a', 'd_b'], [...receiversOf, { device_id: 'd_z', name: 'Z' }]) === '2 devices' && X.targetsSummary(['d_a', 'd_b'], null) === '2 devices' && X.targetsSummary([], null) === 'All');
+    ok('…in Chinese too (全部 / 名字 / N 台)', Z.set.allDevices === '全部' && Z.set.deviceN(3) === '3 台' && Z.set.delivery === '投递' && Z.set.defaultTo === '默认投给' && Z.set.selectAll === '全选');
+
+    // the settings page
+    const mk = async (settings, list = devs) => {
+      const r = await makePlugin({ device_id: 'd_me', ...settings });
+      const p = r.p;
+      p.tab.containerEl = anything();
+      p.detect = async () => FOUND;
+      r.apiCalls = [];
+      p.api = async (method, path) => {
+        r.apiCalls.push(`${method} ${path}`);
+        return path === '/v1/devices' ? (method === 'GET' ? { devices: list } : {}) : ME;
+      };
+      r.groups = [];
+      const origGroup = p.tab.group;
+      p.tab.group = function (key, title, summary) {
+        const g = origGroup.call(this, key, title, summary);
+        const rec = { key, title, summary };
+        r.groups.push(rec);
+        const set = g.setSummary;
+        g.setSummary = (x) => { rec.summary = x; set(x); };
+        return g;
+      };
+      r.draw = async () => {
+        for (const k of ['names', 'buttons', 'toggles', 'dropdowns', 'opened', 'checks', 'links']) ui[k].length = 0;
+        r.groups.length = 0;
+        p.tab.display();
+        for (let i = 0; i < 12; i++) await settle();
+        r.warn = [];
+        if (p.tab.targetsWarn) p.tab.targetsWarn.setText = (x) => { r.warn.push(x); };
+      };
+      return r;
+    };
+
+    {
+      const { p, draw, groups } = await mk({});
+      await draw();
+      ok('the groups, in this order: Receiving, Sending, Devices, Advanced', same(groups.map((g) => g.key), ['receiving', 'delivery', 'devices', 'advanced']) && groups.map((g) => g.title).join() === 'Receiving,Sending,Devices,Advanced', JSON.stringify(groups));
+      const at = (n) => ui.names.indexOf(n);
+      ok('Receiving holds how it is written, then (after the "After it arrives" part) the AI, the Obsidian command, and Pull again last', at(U.writeAs) < at(U.ai) && at(U.ai) < at(U.runCommand) && at(U.runCommand) < at(T.repull) && at(T.repull) < at(U.defaultTo), ui.names.join('|'));
+      ok('Sending comes next, then Devices (add a device … Unpair as its last row, drawn after the list), then Advanced (the rows of the device list itself come from the service, a moment later)', at(U.defaultTo) < at(T.addDevice) && at(T.addDevice) < at(T.unpair) && at(T.unpair) < at(T.serverAddress), ui.names.join('|'));
+      ok('Advanced is only the server address: Pull again and Unpair are not in it', at(T.serverAddress) > at(T.unpair) && ui.names.filter((n) => n === T.serverAddress).length === 1 && ui.names.filter((n) => n === T.repull).length === 1 && ui.names.filter((n) => n === T.unpair).length === 1);
+      ok('"Pull again" is one row, in Receiving: it is drawn before the Sending rows', ui.dropdowns.some((d) => d.name === T.repull) && at(T.repull) < at(U.defaultTo));
+      ok('Unpair says what happens, in the same words as the confirmation (this computer leaves; the others are not affected)', /other devices are not affected/.test(T.unpairDesc) && /其他设备不受影响/.test(Z.unpairDesc) && /other devices are not affected/.test(T.unpairAsk) && /其他设备不受影响/.test(Z.unpairAsk));
+      ok('one row per other device that can receive, each a native checkbox, all ticked by default: this vault and a send-only device are not offered', ui.checks.map((c) => c.name).join() === 'Pixel,Linux' && ui.checks.every((c) => c.type === 'checkbox' && c.checked), JSON.stringify(ui.checks.map((c) => [c.name, c.checked])));
+      ok('…its summary is All', groups.find((g) => g.key === 'delivery').summary === 'All' && p.settings.targets.length === 0);
+      ok('…and the select-all link is there', ui.links.length === 1 && ui.links[0].text === U.selectAll && ui.links[0].shown === true);
+    }
+
+    {
+      const r = await mk({});
+      const { p } = r;
+      await r.draw();
+      const [pixel, linux] = ui.checks;
+      pixel.checked = false;
+      pixel.on.change(); await settle(); await settle();
+      ok('unticking one saves at once, to data.json: only that device is left', same(p.settings.targets, ['d_b']) && same(p.stored.targets, ['d_b']), JSON.stringify(p.stored.targets));
+      ok('…and the folded line becomes its name', r.groups.find((g) => g.key === 'delivery').summary === 'Linux');
+      linux.checked = false;
+      linux.on.change(); await settle(); await settle();
+      ok('the last one cannot be unticked: it stays ticked, nothing is saved, and the line says to keep one (or select all)', linux.checked === true && same(p.stored.targets, ['d_b']) && r.warn.at(-1) === U.keepOne && /select all/.test(U.keepOne) && /1 台/.test(Z.set.keepOne) && /全选/.test(Z.set.keepOne), JSON.stringify(r.warn));
+      pixel.checked = true;
+      pixel.on.change(); await settle(); await settle();
+      ok('ticking every box again is "all": nothing is stored, the warning is cleared', p.settings.targets.length === 0 && p.stored.targets.length === 0 && r.warn.lastIndexOf('') > r.warn.lastIndexOf(U.keepOne) && r.groups.find((g) => g.key === 'delivery').summary === 'All');
+      pixel.checked = false; pixel.on.change(); await settle(); await settle();
+      ok('(one left again)', same(p.settings.targets, ['d_b']) && linux.checked === true && pixel.checked === false);
+      ui.links[0].on.click({ preventDefault() {} }); await settle(); await settle();
+      ok('"Select all" sets the default back to all and ticks every box', p.settings.targets.length === 0 && p.stored.targets.length === 0 && ui.checks.every((c) => c.checked));
+      // two of three: how many
+      const three = await mk({}, [...devs, { device_id: 'd_z', name: 'Tablet', scope: 'full' }]);
+      await three.draw();
+      ui.checks[2].checked = false; ui.checks[2].on.change(); await settle(); await settle();
+      ok('two of three others: the folded line says how many, and the saved list names exactly those two', three.groups.find((g) => g.key === 'delivery').summary === '2 devices' && same(three.p.settings.targets, ['d_a', 'd_b']));
+    }
+
+    {
+      const gone = await mk({ targets: ['d_a', 'd_gone'] });
+      notices.length = 0;
+      await gone.draw();
+      ok('a device removed since last time comes off the default when the page opens, with one Notice, and is saved', same(gone.p.settings.targets, ['d_a']) && same(gone.p.stored.targets, ['d_a']) && notices.filter((n) => n === T.targetsPruned(1, false)).length === 1, JSON.stringify([notices, gone.p.settings.targets]));
+      ok('…the rows show what is left: Pixel ticked, Linux not, and the folded line names Pixel', gone.groups.find((g) => g.key === 'delivery').summary === 'Pixel' && same(ui.checks.map((c) => [c.name, c.checked]), [['Pixel', true], ['Linux', false]]));
+      notices.length = 0;
+      await gone.draw();
+      ok('…and the next time nothing is said again', notices.length === 0);
+      const none = await mk({ targets: ['d_gone'] });
+      notices.length = 0;
+      await none.draw();
+      ok('every saved device gone: back to all, and the Notice says so', none.p.settings.targets.length === 0 && notices.includes(T.targetsPruned(1, true)) && /all devices/.test(T.targetsPruned(1, true)) && /全部设备/.test(Z.targetsPruned(1, true)) && ui.checks.every((c) => c.checked));
+    }
+
+    {
+      const alone = await mk({}, [devs[0], devs[3]]);
+      await alone.draw();
+      ok('no other device that can receive: no checkboxes and no select-all, a line says what to do instead', ui.checks.length === 0 && ui.links.every((l) => !l.shown) && /No other device can receive/.test(U.noOthers) && /还没有其他能接收的设备/.test(Z.set.noOthers), JSON.stringify(ui.checks));
+      const one = await mk({}, [devs[0], devs[1]]);
+      await one.draw();
+      ok('one other device: still the list, with that one row ticked', ui.checks.length === 1 && ui.checks[0].name === 'Pixel' && ui.checks[0].checked);
+      ui.checks[0].checked = false; ui.checks[0].on.change(); await settle(); await settle();
+      ok('…and it is the last one: it cannot be unticked', ui.checks[0].checked === true && one.p.settings.targets.length === 0 && one.warn.at(-1) === U.keepOne);
+    }
+
+    {
+      // unpaired: setup, and the server address (it has to be changeable before pairing)
+      const { p, draw, groups } = await mk({ token: '' });
+      await draw();
+      ok('not paired: the setup rows and Advanced with the server address — no sending, no devices, no Unpair', same(groups.map((g) => g.key), ['advanced']) && ui.names.includes(T.haveCode) && ui.names.includes(T.serverAddress)
+        && ![U.defaultTo, T.addDevice, T.unpair, T.repull, U.writeAs].some((n) => ui.names.includes(n)) && ui.checks.length === 0 && p.settings.token === '', ui.names.join('|'));
+    }
+
+    // Unpair asks first
+    {
+      const r = await mk({ targets: ['d_a'] });
+      const { p } = r;
+      await r.draw();
+      const button = ui.buttons.find((b) => b.name === T.unpair);
+      ok('Unpair is a button in Devices, labelled for what it does', !!button && button.text === T.unpairButton);
+      button.click();
+      const ask = ui.opened.find((m) => m instanceof X.Confirm);
+      ok('pressing it asks first: nothing is sent to the service, this vault is still paired', !!ask && !r.apiCalls.some((c) => c.startsWith('DELETE')) && p.settings.token === 'dk_x');
+      ok('…the question says this computer leaves the account, the other devices are not affected, and that pairing is needed to come back', ask.message === T.unpairAsk && /^This computer leaves the account/.test(ask.message) && /pair again/.test(ask.message) && ask.title === T.unpairTitle && ask.yes === T.unpairYes
+        && Z.unpairAsk.startsWith('这台电脑会退出账号') && /重新配对/.test(Z.unpairAsk) && Z.unpairYes === '解除配对');
+      ask.close();
+      await settle();
+      ok('closing it (Cancel) changes nothing', !r.apiCalls.some((c) => c.startsWith('DELETE')) && p.settings.token === 'dk_x' && same(p.settings.targets, ['d_a']));
+      ask.onYes();
+      for (let i = 0; i < 6; i++) await settle();
+      ok('confirming unpairs: this device is removed from the account, the sign-in and the default are forgotten here', r.apiCalls.includes('DELETE /v1/devices/d_me') && p.settings.token === '' && p.settings.targets.length === 0 && p.stored.targets.length === 0, JSON.stringify(r.apiCalls));
+    }
+
+    // sending: with and without `to`
+    {
+      const { p, files } = await makePlugin({ device_id: 'd_me' });
+      const calls = serve({ 'POST /v1/ingest/file': () => ({ json: { seq: 91 } }), 'POST /v1/ingest': () => ({ json: { seq: 90 } }) });
+      files.set('Notes/idea.md', '# Idea');
+      files.set('Pics/a.png', PNG);
+      const note = { path: 'Notes/idea.md', name: 'idea.md', extension: 'md' };
+      const pic = { path: 'Pics/a.png', name: 'a.png', extension: 'png' };
+      await p.sendText('hello');
+      await p.sendFiles([note, pic]);
+      ok('the default (all): no `to` anywhere — not in a text, not in a note, not in an upload', calls.length === 3 && calls.every((c) => !('to' in (c.body && typeof c.body === 'string' ? JSON.parse(c.body) : {})) && !/[?&]to=/.test(c.path)), JSON.stringify(calls.map((c) => c.path)));
+      calls.length = 0;
+      p.settings.targets = ['d_a', 'd_b'];
+      await p.sendText('hello again');
+      await p.sendFiles([note, pic]);
+      const bodies = calls.filter((c) => c.path === '/v1/ingest').map((c) => JSON.parse(c.body));
+      const upload = calls.find((c) => c.path.startsWith('/v1/ingest/file?'));
+      ok('a chosen default: every text and note carries `to` with exactly those devices', bodies.length === 2 && bodies.every((b) => same(b.to, ['d_a', 'd_b'])), JSON.stringify(bodies.map((b) => b.to)));
+      ok('…and a file upload carries them in the address, with its name and batch beside them', new URL(`https://x${upload.path}`).searchParams.get('to') === 'd_a,d_b' && new URL(`https://x${upload.path}`).searchParams.get('name') === 'a.png');
+      ok('…a link and a selection go the same way (one path for all sends)', await (async () => { calls.length = 0; await p.sendText('https://example.com/x'); return same(JSON.parse(calls[0].body).to, ['d_a', 'd_b']) && JSON.parse(calls[0].body).kind === 'url'; })());
+      ok('the send commands and the menus all end in sendText / sendFiles', ['send-note', 'send-selection'].every((id) => p.commands.some((c) => c.id === id)));
+    }
+
+    // the devices it was for are gone
+    {
+      const { p } = await makePlugin({ device_id: 'd_me', targets: ['d_a'] });
+      const calls = serve({ 'POST /v1/ingest': () => ({ status: 400, json: { error: 'TARGET_UNAVAILABLE', reason: 'gone', gone: ['d_a'] } }) });
+      notices.length = 0;
+      await p.sendText('hello');
+      ok('TARGET_UNAVAILABLE: the default goes back to all, saved, with one Notice that says so — not a second error line', p.settings.targets.length === 0 && p.stored.targets.length === 0 && notices.length === 1 && notices[0] === T.targetsGone(true), JSON.stringify(notices));
+      ok('…and it did not send again by itself, to everyone: one request only', calls.length === 1 && 'to' in JSON.parse(calls[0].body));
+      ok('…in Chinese too', /默认已改回投给全部/.test(Z.targetsGone(true)) && /已从默认里去掉/.test(Z.targetsGone(false)) && /不能接收/.test(Z.errors.TARGET_UNAVAILABLE));
+    }
+    {
+      const { p, files } = await makePlugin({ device_id: 'd_me', targets: ['d_a'] });
+      const calls = serve({ 'POST /v1/ingest': () => ({ status: 400, json: { error: 'TARGET_UNAVAILABLE', reason: 'gone', gone: ['d_a'] } }) });
+      const list = [1, 2, 3].map((n) => { files.set(`N/${n}.md`, `note ${n}`); return { path: `N/${n}.md`, name: `${n}.md`, extension: 'md' }; });
+      notices.length = 0;
+      await p.sendFiles(list);
+      ok('a batch whose devices are gone: one Notice for all of it, and none of the later ones went to everyone (the default is read once per batch)', notices.length === 1 && notices[0] === T.targetsGone(true) && calls.length === 3 && calls.every((c) => same(JSON.parse(c.body).to, ['d_a'])) && p.settings.targets.length === 0, JSON.stringify([notices, calls.length]));
+    }
+    {
+      const { p } = await makePlugin({ device_id: 'd_me', targets: ['d_a', 'd_gone'] });
+      serve({ 'POST /v1/ingest': () => ({ json: { seq: 5, dropped: ['d_gone'] } }) });
+      notices.length = 0;
+      await p.sendText('hello');
+      ok('a send that reached some of them: the ones the service dropped come off the default, with a Notice', same(p.settings.targets, ['d_a']) && same(p.stored.targets, ['d_a']) && notices.includes(T.targetsGone(false)) && notices.includes('dropit: sent'), JSON.stringify(notices));
+    }
+    {
+      const old = await makePlugin({ device_id: 'd_me' }, { token: 'dk_x', mode: 'note', folder: 'In' });
+      ok('settings from before this existed load with the default at all', same(old.p.settings.targets, []));
+      const odd = await makePlugin({ device_id: 'd_me' }, { token: 'dk_x', targets: 'd_a' });
+      ok('a damaged value in data.json is read as all', same(odd.p.settings.targets, []));
+      const pair = await makePlugin({ device_id: 'd_me', targets: ['d_a'] });
+      serve({ 'POST /v1/pair/claim': () => ({ json: { token: 'dk_new', device_id: 'd_new' } }), 'GET /v1/pull': pages([]) });
+      await pair.p.claimCode('abc123');
+      ok('pairing to an account starts at all: the old ids mean nothing there', same(pair.p.settings.targets, []));
+    }
+  }
+
   // ── the sentences for the limits, and the way past the ones the paid plan lifts ──
   {
     const { errorText, apiError, errorNotice, safeLink, STRINGS } = DropitPlugin;
@@ -2202,7 +2919,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('a link that is not one to open: a plain Notice, nothing to click', typeof lastNotice.m === 'string', JSON.stringify(lastNotice));
     errorNotice('dropit: Sending too fast', err);
     ok('a link from the service: the sentence and the way past it, and it stays long enough to click', lastNotice.m.text[0] === 'dropit: Sending too fast'
-      && lastNotice.m.links[0].text === en.upgradeFor('per_day') && lastNotice.m.links[0].href === 'https://x.test/up' && lastNotice.ms >= 12_000, JSON.stringify([lastNotice.m.text, lastNotice.m.links, lastNotice.ms]));
+      && lastNotice.m.links[0].text === en.upgradeFor('per_day') && lastNotice.m.links[0].href === 'https://x.test/up?src=obsidian' && lastNotice.ms >= 12_000, JSON.stringify([lastNotice.m.text, lastNotice.m.links, lastNotice.ms]));
   }
 
   console.log(`\n${fail === 0 ? '✅' : '🛑'}  ${pass} passed, ${fail} failed\n`);

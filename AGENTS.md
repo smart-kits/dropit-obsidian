@@ -77,7 +77,7 @@ offer to add that path to the vault's `.gitignore`.
 
 ### Uninstall
 
-👤 *Settings → dropit → Advanced → Unpair*, disable the plugin, then
+👤 *Settings → dropit → Devices → Unpair* (it asks first), disable the plugin, then
 `rm -rf "$VAULT/.obsidian/plugins/dropit"`. To revoke the device itself, run `dropit devices`
 and `dropit revoke <device_id>` from a CLI with a full token.
 
@@ -85,7 +85,7 @@ and `dropit revoke <device_id>` from a CLI with a full token.
 
 | Notice | Meaning | Fix |
 |---|---|---|
-| `Invalid token` · `This device was removed` | Token invalid or device revoked | 👤 *Advanced → Unpair*, then join with a fresh code |
+| `Invalid token` · `This device was removed` | Token invalid or device revoked | 👤 *Devices → Unpair*, then join with a fresh code |
 | `Invalid pairing code` · `Pairing code expired` | Wrong or expired code | Get a fresh code (valid 5 min) |
 | `Device limit reached` | Device limit reached | 👤 remove an unused device under *Settings → dropit → Devices* |
 | `⚠ dropit` in the status bar | The last sync failed; hover for the reason | Check the network; the built-in server address is tried automatically |
