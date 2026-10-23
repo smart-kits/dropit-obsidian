@@ -32,7 +32,7 @@ const anything = () => new Proxy(function () {}, {
   set: (target, key, v) => { target[key] = v; return true; },
 });
 let thenCalls = 0;
-const ui = { names: [], buttons: [], toggles: [], dropdowns: [], opened: [], checks: [], links: [] };    // what the settings page and its modals drew, and what can be clicked
+const ui = { names: [], buttons: [], toggles: [], dropdowns: [], opened: [], checks: [], links: [], sliders: [] };    // what the settings page and its modals drew, and what can be clicked
 /** A button or toggle that remembers its handler, so a test can press it */
 const control = (rec) => {
   const c = anything();
@@ -47,11 +47,17 @@ const control = (rec) => {
 class Setting {
   constructor() {
     this.settingEl = anything();
+    this.settingEl.addEventListener = (ev, fn) => { (this.listeners ??= {})[ev] = fn; };
     // Obsidian's controlEl: a row can put its own element in it (a checkbox, a link); the page's handlers are kept so a test can fire them
-    this.controlEl = { createEl: (tag, o = {}) => {
+    const make = (tag, o = {}) => {
       const rec = { name: this.name, tag, ...o, checked: false, shown: true, on: {}, addEventListener(ev, fn) { rec.on[ev] = fn; }, setAttribute() {}, toggle(v) { rec.shown = v; }, setText() {} };
       (tag === 'input' ? ui.checks : ui.links).push(rec);
       return rec;
+    };
+    this.controlEl = { createEl: make, createSpan: () => ({ createEl: make }), createDiv: (o = {}) => {
+      const cell = { cls: o.cls, labels: [], on: {}, createSpan: (x = {}) => { const l = { cls: x.cls, text: '', setText(v) { l.text = v; } }; cell.labels.push(l); return l; }, addEventListener(ev, fn) { cell.on[ev] = fn; }, append() {} };
+      (this.cells ??= []).push(cell);
+      return cell;
     } };
   }
   setName(n) { this.name = n; ui.names.push(n); return this; }
@@ -62,6 +68,14 @@ class Setting {
   addDropdown(cb) { const rec = { name: this.name }; ui.dropdowns.push(rec); cb(control(rec)); return this; }
   addText(cb) { cb(anything()); return this; }
   addTextArea(cb) { cb(anything()); return this; }
+  addSlider(cb) {
+    const rec = { row: this, min: null, max: null, step: null, value: null, tooltip: false };
+    const c = { sliderEl: { setAttribute(k, v) { (rec.attrs ??= {})[k] = v; } }, setLimits(a, b, st) { Object.assign(rec, { min: a, max: b, step: st }); return c; }, setValue(v) { rec.value = v; return c; },
+      setDynamicTooltip() { rec.tooltip = true; return c; }, onChange(fn) { rec.change = (v) => { rec.value = v; fn(v); }; return c; } };
+    ui.sliders.push(rec);
+    cb(c);
+    return this;
+  }
   addToggle(cb) { const rec = { name: this.name }; ui.toggles.push(rec); cb(control(rec)); return this; }
   then(cb) { if (++thenCalls < 1000) cb(this); return this; }   // past 1000, stop the loop so the test can say so
 }
@@ -177,7 +191,7 @@ function serve(routes) {
   net = async (req) => {
     const method = req.method ?? 'GET';
     const { pathname, search, host } = new URL(req.url);
-    calls.push({ method, path: pathname + search, host, body: req.body, contentType: req.contentType });
+    calls.push({ method, path: pathname + search, host, auth: req.headers?.authorization, body: req.body, contentType: req.contentType });
     const key = Object.keys(routes).find((k) => { const [m, p] = k.split(' '); return m === method && (pathname + search).startsWith(p); });
     if (!key) return { status: 404, json: { error: 'NOT_FOUND' } };
     const out = await routes[key](req.body && typeof req.body === 'string' ? JSON.parse(req.body) : req.body, pathname + search, host);
@@ -771,57 +785,115 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok(`renders when paired (${mode}), without a promise adopting a Setting`, !err && thenCalls < 50, err?.stack ?? `${thenCalls} then() calls`);
   }
 
-  console.log('── Settings page: pull again keeps a number per mode ──');
+  console.log('── Settings page: pull again — two sliders ──');
   {
-    // Picking "the last N items" filled in 20, and switching to "the last N days" kept 20 instead of 7
-    const { p } = await makePlugin();
-    p.tab.containerEl = anything();
-    p.api = async (m, path) => (path === '/v1/devices' ? { devices: [] } : {});
-    const asked = [];
-    p.repull = async (mode, n) => { asked.push([mode, n]); };
-    const row = {};
-    const { addDropdown, addText, addButton } = Setting.prototype;
-    const isRepull = (s) => s.name === DropitPlugin.STRINGS.en.repull;
-    Setting.prototype.addDropdown = function (cb) {
-      if (!isRepull(this)) return addDropdown.call(this, cb);
-      const d = anything();
-      d.onChange = (fn) => { row.pick = fn; return d; };
-      cb(d);
-      return this;
+    const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+    const T = DropitPlugin.STRINGS.en;
+    const Z = DropitPlugin.STRINGS.zh;
+    const PLANS = { limits: { free: { days: 1 }, paid: { days: 10 } }, payments: { open: true } };
+    const FREE = { plan: 'free', kept_days: 1, upgrade_url: 'https://x.test/upgrade?u=1&s=2&why=account&buy=year' };
+    const draw = async (me, plans = PLANS) => {
+      const { p } = await makePlugin();
+      p.tab.containerEl = anything();
+      p.api = async (m, path) => (path === '/v1/plans' ? (plans ?? {}) : path === '/v1/me' ? (me ?? { plan: 'free', devices_used: 1, devices_limit: 2 }) : {});
+      p.meCache = me ? { m: me, at: Date.now() } : undefined;
+      if (plans) p.plansCache = { plans, at: Date.now() };
+      const hint = { shown: false, parts: [], links: [], toggle(v) { hint.shown = v; }, empty() { hint.parts.length = 0; hint.links.length = 0; }, createSpan(o) { hint.parts.push(o.text); return {}; },
+        createEl(tag, o) { hint.links.push(o); return { addEventListener(ev, fn) { o.click = fn; } }; }, addEventListener() {} };
+      ui.sliders.length = 0; ui.buttons.length = 0;
+      const asked = [];
+      p.repull = async (...a) => { asked.push(a); };
+      const opened = [];
+      p.openPlans = async (o) => { opened.push(o); };
+      timers.length = 0;
+      p.tab.pullAgain({ createDiv: () => hint });
+      await settle();
+      const [count, daysSl] = ui.sliders.slice(-2);
+      const go = ui.buttons.at(-1);
+      return { p, count, days: daysSl, hint, asked, opened, go };
     };
-    Setting.prototype.addText = function (cb) {
-      if (!isRepull(this)) return addText.call(this, cb);
-      const x = anything();
-      x.setValue = (v) => { row.value = v; return x; };
-      x.onChange = (fn) => { row.type = (v) => { row.value = v; fn(v); }; return x; };
-      cb(x);
-      return this;
+    const free = await draw(FREE);
+    ok('the count is a native slider, 1 to 50, step 1, starting at 10, with its value shown while dragging', free.count.min === 1 && free.count.max === 50 && free.count.step === 1 && free.count.value === 10 && free.count.tooltip === true, JSON.stringify([free.count.min, free.count.max, free.count.value]));
+    ok('the days are a slider from 1 to what Paid keeps (read from the plans, not written here), starting at 1', free.days.min === 1 && free.days.max === 10 && free.days.value === 1 && free.days.tooltip === true && free.days.step === 1, JSON.stringify([free.days.min, free.days.max, free.days.value]));
+    const [countCell, daysCell] = free.days.row.cells;
+    ok('one row: its name, then the two sliders side by side, each in a cell with its own words, the button after them', free.count.row === free.days.row && free.count.row.name === T.repull && free.days.row.cells.length === 2, JSON.stringify(free.days.row.cells.map((c) => c.cls)));
+    ok('the words over each: the latest 10 items, the last 1 day', T.repullCount(10) === 'Latest 10 items' && T.repullCount(1) === 'Latest 1 item' && T.repullWithin(1) === 'Last 1 day' && T.repullWithin(5) === 'Last 5 days' && Z.repullCount(10) === '最新 10 条' && Z.repullWithin(1) === '最近 1 天'
+      && countCell.labels[0].text === 'Latest 10 items' && daysCell.labels[0].text === 'Last 1 day', JSON.stringify([countCell.labels, daysCell.labels]));
+    free.count.change(3);
+    ok('…and they change as the slider moves', countCell.labels[0].text === 'Latest 3 items');
+    free.count.change(10);
+    ok('each slider has its own name for a screen reader, in both languages', free.count.attrs?.['aria-label'] === T.repullCountLabel && free.days.attrs?.['aria-label'] === T.repullDaysLabel && !!T.repullCountLabel && !!T.repullDaysLabel && T.repullCountLabel !== T.repullDaysLabel && !!Z.repullCountLabel && !!Z.repullDaysLabel);
+    free.count.change(37);
+    free.days.change(4);
+    ok('free: the days slider goes back to 1 at once, whatever is dragged', free.days.value === 1 && free.hint.shown === true, JSON.stringify([free.days.value, free.hint.shown]));
+    ok('…and a line under it says why, with the plans link — not a Notice', /^Free keeps items for 1 day\. With Paid, anything you missed can come back for up to 10 days\.$/.test(free.hint.parts[0]) && free.hint.links.length === 1 && free.hint.links[0].text === 'See plans' && timers.includes(4000), JSON.stringify([free.hint.parts, free.hint.links]));
+    free.hint.links[0].click({ preventDefault() {}, stopPropagation() {} });
+    ok('the link opens the plans, said to be about how long items are kept', same(free.opened, [{ why: 'kept' }]));
+    await free.go.click();
+    ok('Pull asks for the count on the slider and 1 day', same(free.asked, [['recent', 37, 1]]), JSON.stringify(free.asked));
+    const rowOn = { keydown: free.days.row.listeners?.keydown, pointerdown: daysCell.on.pointerdown };
+    free.days.change(2);
+    rowOn.keydown({ key: 'a', stopPropagation() {} });
+    ok('another key leaves the line up; Esc puts it away', free.hint.shown === true && (rowOn.keydown({ key: 'Escape', stopPropagation() {} }), free.hint.shown === false));
+    free.days.change(2);
+    ok('dragged again it comes back; a second touch of the row puts it away, and the drag that follows does not bring it back', free.hint.shown === true && (rowOn.pointerdown(), free.hint.shown === false) && (free.days.change(3), free.hint.shown === false));
+    const paid = await draw({ plan: 'paid', kept_days: 10 });
+    paid.days.change(7);
+    ok('paid: the slider moves, no line appears', paid.days.value === 7 && paid.hint.shown === false);
+    paid.days.change(10);
+    await paid.go.click();
+    ok('…up to the days Paid keeps; Pull asks for 10 items and those days', same(paid.asked, [['recent', 10, 10]]), JSON.stringify(paid.asked));
+    const short = await draw({ plan: 'paid', kept_days: 4 });
+    short.days.change(9);
+    ok('an account that keeps items 4 days cannot go past 4 (the track is still the whole 10)', short.days.value === 4 && short.days.max === 10 && short.hint.shown === false, JSON.stringify([short.days.value, short.days.max]));
+    const noPlans = await draw(FREE, null);
+    ok('the plans not read: the track is as long as this account can go, and the line has no number', noPlans.days.max === 1 && (noPlans.days.change(3), /for longer\.$/.test(noPlans.hint.parts[0])), JSON.stringify(noPlans.hint.parts));
+    const closed = await draw(FREE, { ...PLANS, payments: { open: false } });
+    closed.days.change(2);
+    ok('payments off: the sentence, and no link', closed.hint.shown === true && closed.hint.links.length === 0, JSON.stringify(closed.hint.links));
+    const noLink = await draw({ plan: 'free', kept_days: 1 });
+    noLink.days.change(2);
+    ok('no way to Paid in the account: the sentence only', noLink.hint.shown === true && noLink.hint.links.length === 0);
+    ok('the hint in Chinese, with and without a number', Z.repullHint(1, 10) === '免费版内容保留 1 天。升级付费版，错过的内容最长可以找回 10 天。' && /更久。$/.test(Z.repullHint(1, null)) && Z.repullSeePlans === '了解付费版' && T.repullSeePlans === 'See plans'
+      && !/!|！/.test(T.repullHint(1, 10) + Z.repullHint(1, 10)));
+    ok('the old drop-down words are gone', !('repullFreeNote' in T) && !('repullFreeNote' in Z));
+    // the pure parts
+    ok('what the days slider can do: track = what Paid keeps; reach = this account\'s days, at most that; 1 when not known',
+      same(DropitPlugin.repullDays({ kept_days: 1 }, PLANS), { track: 10, allowed: 1, paid: 10 }) && same(DropitPlugin.repullDays({ kept_days: 10 }, PLANS), { track: 10, allowed: 10, paid: 10 })
+      && DropitPlugin.repullDays({ kept_days: 30 }, PLANS).allowed === 10 && DropitPlugin.repullDays({ kept_days: 4 }, PLANS).allowed === 4 && same(DropitPlugin.repullDays(null, null), { track: 1, allowed: 1, paid: null })
+      && DropitPlugin.repullDays({ kept_days: 10 }, { limits: { paid: { days: 14 } } }).allowed === 10 && DropitPlugin.repullDays({ kept_days: 20 }, { limits: { paid: { days: 14 } } }).allowed === 14);
+    ok('the two values are held to 1–50 and 1–reach', same(DropitPlugin.repullRange(500, 99, { kept_days: 10 }, PLANS), { count: 50, days: 10 }) && same(DropitPlugin.repullRange(0, 0, { kept_days: 10 }, PLANS), { count: 1, days: 1 })
+      && same(DropitPlugin.repullRange(20, 5, FREE, PLANS), { count: 20, days: 1 }) && same(DropitPlugin.repullRange(NaN, undefined, { kept_days: 10 }, PLANS), { count: 10, days: 1 }) && same(DropitPlugin.repullRange(12.6, 2.4, { kept_days: 10 }, PLANS), { count: 13, days: 2 }));
+  }
+
+  console.log('── Pull again: what is asked of the service ──');
+  {
+    const run = async (me, n, days, plans = { limits: { paid: { days: 10 } } }) => {
+      const { p } = await makePlugin();
+      p.meCache = { m: me, at: Date.now() };
+      p.plansCache = { plans, at: Date.now() };
+      const calls = serve({ 'POST /v1/cursor/reset': () => ({ json: { to_seq: 7 } }), 'GET /v1/pull': pages([]) });
+      const before = Date.now();
+      await p.repull('recent', n, days);
+      const reset = calls.find((c) => c.path === '/v1/cursor/reset');
+      const pull = calls.find((c) => c.path.startsWith('/v1/pull'));
+      const q = new URL(`http://x${pull.path}`).searchParams;
+      return { reset: JSON.parse(reset.body), after: q.get('after'), since: Number(q.get('since')), before, why: q.get('why') };
     };
-    Setting.prototype.addButton = function (cb) {
-      if (!isRepull(this)) return addButton.call(this, cb);
-      const b = anything();
-      b.onClick = (fn) => { row.go = fn; return b; };
-      cb(b);
-      return this;
-    };
-    try {
-      p.tab.display();
-      row.pick('last');
-      const lastDefault = row.value;
-      row.pick('days');
-      ok('the last N items starts at 20, the last N days at 7', lastDefault === '20' && row.value === '7', `${lastDefault} · ${row.value}`);
-      row.type('3');
-      row.pick('last');
-      const backToLast = row.value;
-      row.type('50');
-      row.pick('days');
-      ok('switching back and forth keeps what was typed for each', backToLast === '20' && row.value === '3', `${backToLast} · ${row.value}`);
-      row.pick('last');
-      await row.go();
-      ok('pull again uses the number of the chosen mode', JSON.stringify(asked) === '[["last",50]]', JSON.stringify(asked));
-    } finally {
-      Object.assign(Setting.prototype, { addDropdown, addText, addButton });
-    }
+    const day = 86_400_000;
+    const near = (r, d) => Math.abs(r.since - (r.before - d * day)) < 5_000;
+    const a = await run({ kept_days: 1 }, 10, 1);
+    ok('both limits at once: the cursor goes back by the last 10, and the pull is limited to the last day', a.reset.last === 10 && a.after === '7' && near(a, 1) && a.why === 'repull', JSON.stringify(a));
+    const b = await run({ kept_days: 1 }, 500, 6);
+    ok('more than 50 items asked: 50; more days than a free account keeps: 1', b.reset.last === 50 && near(b, 1), JSON.stringify(b));
+    const c = await run({ kept_days: 10 }, 33, 7);
+    ok('paid, 33 items, 7 days', c.reset.last === 33 && near(c, 7), JSON.stringify(c));
+    const d = await run({ kept_days: 10 }, 20, 40);
+    ok('paid, 40 days asked: what Paid keeps (10)', near(d, 10), JSON.stringify(d));
+    const e = await run({ kept_days: 10 }, 20, undefined);
+    ok('no days given: 1 day', near(e, 1));
+    const f = await run({ kept_days: 10 }, 1, 1);
+    ok('one item is the least', f.reset.last === 1);
   }
 
   console.log('── Settings page: the top line stays true ──');
@@ -947,7 +1019,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     await p.connect();
     ok('asks for a ticket once', asked === 1, String(asked));
     ok('remembers that real-time is not included', p.noRealtime === true && p.state === 'manual', p.state);
-    ok('says so once, mentioning the trial\'s length the service gave', notices.length === 1 && new RegExp(String(ME.trial_days)).test(notices[0]) && !/\b10\b/.test(notices[0]), JSON.stringify(notices));
+    ok('says so once, in the one name for it, and writes no number it was not given', notices.length === 1 && /Real-time delivery isn't part of your plan/.test(notices[0]) && !/\d/.test(notices[0]) && !/push/i.test(notices[0]), JSON.stringify(notices));
     p.heartbeat(); p.heartbeat();
     await settle();
     ok('heartbeats stop asking (every one used to)', asked === 1, String(asked));
@@ -965,7 +1037,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     const sockety = () => { globalThis.WebSocket = class { constructor() { this.readyState = 1; } close() {} send() {} }; };
 
     // upgrade_url gets its source; the hourly limit is never sold; unsafe links stay dropped
-    ok('upgradeLink tags the source at the end', T.upgradeLink({ upgrade_url: UP }) === `${UP}&src=obsidian`, T.upgradeLink({ upgrade_url: UP }));
+    ok('upgradeLink tags the source at the end', T.upgradeLink({ upgrade_url: UP }) === `${UP.replace('&buy=year', '')}&src=obsidian`, T.upgradeLink({ upgrade_url: UP }));
     ok('…a link with no query gets ?src', T.upgradeLink({ upgrade_url: 'https://dropit.example/upgrade' }) === 'https://dropit.example/upgrade?src=obsidian');
     ok('…and a link with a #fragment gets it before the fragment, whether or not it has a query', T.upgradeLink({ upgrade_url: 'https://dropit.example/upgrade#plans' }) === 'https://dropit.example/upgrade?src=obsidian#plans'
       && T.upgradeLink({ upgrade_url: 'https://dropit.example/upgrade?a=1#plans' }) === 'https://dropit.example/upgrade?a=1&src=obsidian#plans');
@@ -974,7 +1046,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     {
       notices.length = 0;
       T.errorNotice('dropit: today is used up', { data: { upgrade_url: UP, why: 'per_day' } });
-      ok('a limit Notice carries the tagged link', lastNotice.m.links[0].href === `${UP}&src=obsidian`, JSON.stringify(lastNotice.m.links));
+      ok('a limit Notice carries the tagged link', lastNotice.m.links[0].href === `${UP.replace('&buy=year', '')}&src=obsidian`, JSON.stringify(lastNotice.m.links));
       T.errorNotice('dropit: slow down', { data: { upgrade_url: UP, why: 'per_day', window: 'hour' } });
       ok('…and the hourly one only the text', typeof lastNotice.m === 'string', JSON.stringify(lastNotice.m));
     }
@@ -987,16 +1059,46 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('what the account has had: only what it said', JSON.stringify(T.trialFacts({}, 14)) === JSON.stringify({ days: 0, items: 0, devices: 0 }));
     ok('…the first day counts as 1, and it stops at the trial\'s length', T.trialFacts({ created_at: Date.now() - 100 }, 14).days === 1 && T.trialFacts({ created_at: Date.now() - 30 * DAY }, 14).days === 14);
 
+    // The links of a moment: the plans page (no buy=), tagged, and asked for what it is for; a limit's link is the plans page too
+    ok('planLink drops buy= and says why, the signed part untouched', T.planLink({ upgrade_url: UP }, 'realtime') === 'https://dropit.example/upgrade?u=1&s=2&why=realtime&src=obsidian', T.planLink({ upgrade_url: UP }, 'realtime'));
+    ok('…buy= first or last, none at all, a #fragment (why goes after what is there)', T.planLink({ upgrade_url: 'https://x.test/up?buy=year&u=1' }, 'account') === 'https://x.test/up?u=1&src=obsidian&why=account'
+      && T.planLink({ upgrade_url: 'https://x.test/up?u=1&buy=year' }, 'account') === 'https://x.test/up?u=1&src=obsidian&why=account'
+      && T.planLink({ upgrade_url: 'https://x.test/up' }, 'realtime') === 'https://x.test/up?src=obsidian&why=realtime'
+      && T.planLink({ upgrade_url: 'https://x.test/up?u=1&buy=year#top' }, 'realtime') === 'https://x.test/up?u=1&src=obsidian&why=realtime#top', T.planLink({ upgrade_url: 'https://x.test/up?u=1&buy=year#top' }, 'realtime'));
+    ok('…nothing when there is no link, or it is the hourly limit', T.planLink({}, 'realtime') === null && T.planLink({ upgrade_url: UP, window: 'hour' }, 'realtime') === null);
+
+    // Prices and facts: only what the plans and the account say
+    const PLANS = { payments: { open: true }, plans: [{ id: 'year', price: { cents: 1990, currency: 'USD' }, trial: { cents: 190, days: 30 } }, { id: 'year_once', price: { cents: 2990, currency: 'USD' } }],
+      limits: { free: { days: 1, perDay: 20, fileMB: 10, devices: 2 }, paid: { days: 10, perDay: 300, fileMB: 100, devices: 10 } } };
+    ok('prices: first month, year and one-time year, written like the website', JSON.stringify(T.planPrices(PLANS, { trial_available: true })) === JSON.stringify({ trial: '$1.90', year: '$19.90', once: '$29.90' }), JSON.stringify(T.planPrices(PLANS, {})));
+    ok('…no first month for an account that had one; nothing at all without plans', T.planPrices(PLANS, { trial_available: false }).trial === '' && JSON.stringify(T.planPrices(null, null)) === JSON.stringify({ trial: '', year: '', once: '' }));
+    {
+      const n = 14, now = Date.now();
+      const m = { created_at: now - 13 * DAY, items_total: 41, devices_used: 2, kept_days: 1 };
+      const v = T.momentFacts(m, PLANS, n, true, now);
+      ok('facts: days while it is still the trial, the account\'s items and devices, the paid limits, rich', v.days === 14 && v.items === 41 && v.devices === 2 && v.kept === 1 && v.rich && v.linked && v.perks.perDay === 300 && v.perks.days === 10, JSON.stringify(v));
+      ok('…long after the trial: no "these N days" (items count from sign-up)', T.momentFacts({ ...m, created_at: now - 60 * DAY }, PLANS, n, true, now).days === null);
+      ok('…few items and one device: not rich; 10 items is', !T.momentFacts({ ...m, items_total: 9, devices_used: 1 }, PLANS, n, true, now).rich && T.momentFacts({ ...m, items_total: 10, devices_used: 1 }, PLANS, n, true, now).rich);
+      ok('…nothing given: nothing made up', JSON.stringify(T.momentFacts({}, null, null, false, now)) === JSON.stringify({ days: null, items: 0, devices: 0, kept: null, rich: false, linked: false, perks: null }), JSON.stringify(T.momentFacts({}, null, null, false, now)));
+    }
+
     for (const lang of ['en', 'zh']) {
       const S = T.STRINGS[lang];
-      const f = { days: 12, items: 41, devices: 2 };
-      ok(`${lang}: "what you had" says days, items and devices`, /12/.test(S.enjoyed(f)) && /41/.test(S.enjoyed(f)) && /2/.test(S.enjoyed(f)), S.enjoyed(f));
-      ok(`${lang}: no items sent: that half is left out`, !/41|\b0\b/.test(S.enjoyed({ ...f, items: 0 })) && /12/.test(S.enjoyed({ ...f, items: 0 })), S.enjoyed({ ...f, items: 0 }));
-      ok(`${lang}: one device: that half is left out`, S.enjoyed({ ...f, devices: 1 }).replace(/12|41/g, '').search(/\d/) === -1, S.enjoyed({ ...f, devices: 1 }));
-      for (const key of ['noRealtime', 'trialOver', 'trialEnding']) {
-        ok(`${lang}: ${key} carries the length it is given, and none when it has none`, S[key](14).includes('14') && !/\d{2}/.test(S[key](null)), `${S[key](14)} | ${S[key](null)}`);
+      const rich = T.momentFacts({ created_at: Date.now() - 5 * DAY, items_total: 41, devices_used: 2, kept_days: 1 }, PLANS, 14, true);
+      const plain = T.momentFacts({ created_at: Date.now() - 5 * DAY, items_total: 3, devices_used: 1, kept_days: 1 }, PLANS, 14, true);
+      const bare = T.momentFacts({}, null, null, false);
+      for (const kind of ['T2', 'T3', 'N']) {
+        const r = S.moment(kind, rich), p = S.moment(kind, plain), b = S.moment(kind, bare);
+        ok(`${lang}/${kind}: the fuller sentence says items, devices and what Paid adds`, /41/.test(r) && /2/.test(r) && /300/.test(r) && /100/.test(r) && /10/.test(r), r);
+        ok(`${lang}/${kind}: little to show: no counts and no list of perks`, !/41|300|100/.test(p) && !/ 3 /.test(p), p);
+        ok(`${lang}/${kind}: nothing known: no number at all`, !/\d/.test(b.replace('不到 1 天', '')), b);
+        ok(`${lang}/${kind}: one name for it, nothing about storing or backing up`, /real-time delivery|实时送达/i.test(r) && !/push|推送|后台接收|storage|存储|备份|云盘/i.test(r + p + b), r);
       }
-      ok(`${lang}: the day count of the countdown line comes from the caller`, S.trialSoon(S.daysLeft(3), 14).includes('14') && !/\d{2}/.test(S.trialSoon(S.daysLeft(0), null)), S.trialSoon(S.daysLeft(3), 14));
+      ok(`${lang}/T1: the countdown comes from the caller`, S.moment('T1', bare, S.daysLeft(3)).includes('3') && !/\d{2}/.test(S.moment('T1', bare, S.daysLeft(3))), S.moment('T1', bare, S.daysLeft(3)));
+      ok(`${lang}: the button says what keeping it costs: first month, else the year, else nothing`, /1\.90/.test(S.keepLabel({ trial: '$1.90', year: '$19.90' })) && /19\.90/.test(S.keepLabel({ trial: '', year: '$19.90' })) && !/\d/.test(S.keepLabel({ trial: '', year: '' })));
+      ok(`${lang}: the small print under it: the year after the first month, and cancel anytime; none without a price`, /19\.90/.test(S.keepNote({ trial: '$1.90', year: '$19.90' })) && S.keepNote({ trial: '', year: '' }) === '');
+      ok(`${lang}: Paid ending says the date, what it keeps; no limits given: still a sentence`, /2026-11-05/.test(S.paidEnding('2026-11-05', S.limitsLine(PLANS.limits.paid, false))) && /300/.test(S.paidEnding('2026-11-05', S.limitsLine(PLANS.limits.paid, false))) && !/\d{3}/.test(S.paidEnding('2026-11-05', '').replace('2026-11-05', '')));
+      ok(`${lang}: Paid ended says the free limits and the date, not the account's total`, /20/.test(S.paidEnded('2026-11-15', S.limitsLine(PLANS.limits.free, false))) && /2026-11-15/.test(S.paidEnded('2026-11-15', '')) && !/total|累计/.test(S.paidEnded('2026-11-15', '')));
     }
 
     // T3: the trial ended — says what the account had, with the link when payments are open, once
@@ -1007,8 +1109,8 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       p.realtimeUntil = Date.now() - 1000;
       notices.length = 0;
       await p.stopRealtime('trial_over', undefined, Object.assign(new Error('over'), { data: { reason: 'trial_over' } }));
-      ok('T3: says it ended, the trial\'s length, and what the account had', notices.length === 1 && /14-day/.test(notices[0]) && /41 items/.test(notices[0]) && /2 devices/.test(notices[0]), JSON.stringify(notices));
-      ok('T3: Paid keeps it on, and the link is tagged with this client', /Paid keeps real-time/.test(notices[0]) && lastNotice.m.links[0].href === `${UP}&src=obsidian`, JSON.stringify(lastNotice.m.links));
+      ok('T3: says it ended, and what the account had', notices.length === 1 && /trial has ended/.test(notices[0]) && /41 items/.test(notices[0]) && /2 devices/.test(notices[0]) && /In these 1[34] days/.test(notices[0]), JSON.stringify(notices));
+      ok('T3: the link opens the plans (no buy=), says why, is tagged with this client, and stands on its own', lastNotice.m.links.length === 1 && lastNotice.m.links[0].href === 'https://dropit.example/upgrade?u=1&s=2&why=realtime&src=obsidian' && lastNotice.m.links[0].text === 'Keep real-time delivery', JSON.stringify(lastNotice.m.links));
       ok('T3: the notice is remembered per period in the settings', Object.keys(p.stored.moments).some((k) => k.startsWith('T3.')), JSON.stringify(p.stored.moments));
       await p.stopRealtime('trial_over', undefined, null);
       ok('T3: not said again', notices.length === 1, JSON.stringify(notices));
@@ -1019,7 +1121,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       p.api = async (m, path) => (path === '/v1/me' ? free({ upgrade_url: null }) : {});
       notices.length = 0;
       await p.stopRealtime('trial_over', undefined, null);
-      ok('T3, payments closed: facts only — no link, no Paid sentence', notices.length === 1 && typeof lastNotice.m === 'string' && !/Paid/.test(notices[0]) && /41 items/.test(notices[0]), JSON.stringify(notices));
+      ok('T3, payments closed: facts only — no link, no Paid sentence', notices.length === 1 && typeof lastNotice.m === 'string' && !/Paid|also get/.test(notices[0]) && /41 items/.test(notices[0]), JSON.stringify(notices));
     }
     {
       // the account can't be read: the same notice, without any number and without a link
@@ -1049,11 +1151,11 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       notices.length = 0;
       p.heartbeat(); p.heartbeat();
       await settle();
-      ok('T1: with 3 days or less left, says so once, with what the account had', notices.length === 1 && /3 days left/.test(notices[0]) && /14 days/.test(notices[0]) && /41 items/.test(notices[0]), JSON.stringify(notices));
+      ok('T1: with 3 days or less left, says so once, with what the account had', notices.length === 1 && /has 3 days left/.test(notices[0]) && /In these 1[34] days you sent 41 items/.test(notices[0]), JSON.stringify(notices));
       p.realtimeUntil = Date.now() + 3 * 3_600_000;
       p.heartbeat(); p.heartbeat();
       await settle();
-      ok('T2: under a day is its own notice, once, keeping the old wording and the service\'s length', notices.length === 2 && /less than a day/.test(notices[1]) && /14 days/.test(notices[1]) && /41 items/.test(notices[1]), JSON.stringify(notices));
+      ok('T2: under a day is its own notice, once', notices.length === 2 && /less than a day/.test(notices[1]) && /41 items/.test(notices[1]), JSON.stringify(notices));
       ok('T1 and T2 are remembered separately', Object.keys(p.stored.moments).some((k) => k.startsWith('T1.')) && Object.keys(p.stored.moments).some((k) => k.startsWith('T2.')), JSON.stringify(p.stored.moments));
       p.unloaded = true;
     }
@@ -1068,7 +1170,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       notices.length = 0;
       p.heartbeat();
       await settle();
-      ok('T2: nothing sent and one device: neither half is written', notices.length === 1 && !/ 0 |items sent|devices receiving/.test(notices[0]) && /12 days|13 days/.test(notices[0]), JSON.stringify(notices));
+      ok('T2: nothing sent and one device: neither half is written, and no number at all', notices.length === 1 && !/\d|devices/.test(notices[0]) && /less than a day/.test(notices[0]), JSON.stringify(notices));
       p.unloaded = true;
     }
     {
@@ -1089,7 +1191,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       p.api = async (m, path) => (path === '/v1/me' ? paid : {});
       notices.length = 0;
       await p.accountMoments(paid);
-      ok('P1: a paid year with under a week left says when it ends, once', notices.length === 1 && /Paid runs until \d{4}-\d{2}-\d{2}/.test(notices[0]) && !/\d+ items a day/.test(notices[0]), JSON.stringify(notices));
+      ok('P1: a paid year with under a week left says when it ends, once', notices.length === 1 && /Paid ends on \d{4}-\d{2}-\d{2}/.test(notices[0]) && !/\d+ items a day/.test(notices[0]) && typeof lastNotice.m === 'object' && lastNotice.m.links[0].href === '#' && /^Renew a year/.test(lastNotice.m.links[0].text), JSON.stringify(notices));
       await p.accountMoments(paid);
       ok('P1: not again for the same end', notices.length === 1, JSON.stringify(notices));
       ok('P1: the settings page line shows the date', /Paid until \d{4}-\d{2}-\d{2}/.test(T.STRINGS.en.account({ ...paid, devices_used: 1, devices_limit: 10, bytes_used: 0, bytes_limit: 1048576 })), 'account line');
@@ -1102,7 +1204,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       const gone = { plan: 'free', paid_until: endedAt, paid_grace_until: endedAt + 10 * DAY, items_total: 500, upgrade_url: UP };
       notices.length = 0;
       await p.accountMoments(gone);
-      ok('P2: Paid just ended: one notice with the account\'s total, the end of the grace and a tagged renew link', notices.length === 1 && /Paid has ended/.test(notices[0]) && /500 items in total/.test(notices[0]) && lastNotice.m.links[0].href === `${UP}&src=obsidian`, JSON.stringify(notices));
+      ok('P2: Paid just ended: one notice with the end of the grace and a plans link (no buy=)', notices.length === 1 && /Paid has ended/.test(notices[0]) && /What you already sent stays/.test(notices[0]) && !/in total/.test(notices[0]) && lastNotice.m.links[0].href === 'https://dropit.example/upgrade?u=1&s=2&why=account&src=obsidian', JSON.stringify(notices));
       await p.accountMoments(gone);
       ok('P2: once', notices.length === 1, JSON.stringify(notices));
     }
@@ -1113,6 +1215,56 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       await p.accountMoments({ plan: 'free', paid_until: 1, paid_grace_until: null });
       ok('P2: no grace period (refunded, or never paid): nothing is said', notices.length === 0, JSON.stringify(notices));
     }
+  }
+
+  console.log('── Plans entries: status bar, settings line, renewal link asked for at the click ──');
+  {
+    const DAY = 86_400_000;
+    const UPL = 'https://dropit.example/upgrade?u=1&s=2&why=account&buy=year';
+    const opened = [];
+    window.open = (u) => opened.push(u);
+    // The status bar item: only for a free account with a link, while the trial is ending or over
+    const { p } = await makePlugin();
+    let shown = null;
+    p.upEl.toggle = (v) => { shown = v; };
+    p.meCache = { m: { plan: 'free', upgrade_url: UPL }, at: Date.now() };
+    p.refreshUpsell();
+    ok('status bar item: hidden while the trial has plenty of days left', shown === false, String(shown));
+    p.realtimeUntil = Date.now() + 2 * DAY; p.refreshUpsell();
+    ok('…shown with 3 days or less left', shown === true, String(shown));
+    p.realtimeUntil = null; p.realtimeWhy = 'trial_over'; p.refreshUpsell();
+    ok('…shown once the trial is over', shown === true);
+    p.meCache = { m: { plan: 'free', upgrade_url: null }, at: Date.now() }; p.refreshUpsell();
+    ok('…not when there is no way to Paid (payments closed)', shown === false);
+    p.meCache = { m: { plan: 'paid', paid_until: Date.now() + DAY }, at: Date.now() }; p.refreshUpsell();
+    ok('…never for a paid account', shown === false);
+
+    // A click: a free account goes to the plans from its own link; a paid one asks for the renewal link right then
+    p.meCache = { m: { plan: 'free', upgrade_url: UPL }, at: Date.now() };
+    let asked = [];
+    p.api = async (m, path, body) => { asked.push([m, path, body]); return {}; };
+    await p.openPlans({ why: 'realtime' });
+    ok('click, free: the plans page from the account\'s link, no request', opened.at(-1) === 'https://dropit.example/upgrade?u=1&s=2&why=realtime&src=obsidian' && asked.length === 0, JSON.stringify([opened, asked]));
+    p.meCache = { m: { plan: 'paid', paid_until: Date.now() + DAY, renews: false }, at: Date.now() };
+    p.api = async (m, path, body) => { asked.push([m, path, body]); return { checkout_url: 'https://dropit.example/upgrade?_ptxn=txn_01abc', transaction_id: 'txn_01abc' }; };
+    await p.openPlans();
+    ok('click, paid: one request for a one-time year, from this client, and the page it names opens', asked.length === 1 && asked[0][0] === 'POST' && asked[0][1] === '/v1/checkout' && asked[0][2].plan === 'year_once' && asked[0][2].from === 'obsidian'
+      && opened.at(-1) === 'https://dropit.example/upgrade?_ptxn=txn_01abc&src=obsidian', JSON.stringify([asked, opened]));
+    p.api = async () => { throw Object.assign(new Error('slow down'), { code: 'RATE_LIMITED' }); };
+    notices.length = 0;
+    await p.openPlans();
+    ok('click, too many tries today: says so, opens nothing new', notices.length === 1 && /too many tries/.test(notices[0]) && opened.length === 2, JSON.stringify(notices));
+    p.api = async () => { throw new Error('offline'); };
+    notices.length = 0;
+    await p.openPlans();
+    ok('click, offline: says it could not open', notices.length === 1 && /couldn't open/.test(notices[0]), JSON.stringify(notices));
+
+    // The settings line: a link after the account line, for a free account with a link and a paid one about to end
+    const row = (log) => ({ descEl: { createEl: (tag, o) => { log.push(o); return { addEventListener() {} }; } } });
+    const entry = (m) => { const log = []; p.tab.accountEntry(row(log), m); return log.map((o) => o.text); };
+    ok('settings line: free with a link: See plans', JSON.stringify(entry({ plan: 'free', upgrade_url: UPL })) === '["See plans"]', JSON.stringify(entry({ plan: 'free', upgrade_url: UPL })));
+    ok('…free without one: nothing', entry({ plan: 'free' }).length === 0);
+    ok('…paid and ending within a week, not renewing: Renew; renewing or far off: nothing', JSON.stringify(entry({ plan: 'paid', renews: false, paid_until: Date.now() + 3 * DAY })) === '["Renew"]' && entry({ plan: 'paid', renews: true, paid_until: Date.now() + 3 * DAY }).length === 0 && entry({ plan: 'paid', renews: false, paid_until: Date.now() + 30 * DAY }).length === 0);
   }
 
   console.log('── Real-time trial: countdown, end, full for today ──');
@@ -2208,7 +2360,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       await pull(p);
       const notes = notesIn(files);
       const note = files.get(notes[0]);
-      ok('the note keeps them in the order they arrived and were written (by seq)', /!\[\[d\.png\]\]\n\n!\[\[b\.png\]\]\n\nthe words MODE:stdin\n\n!\[\[c\.png\]\]/.test(note), JSON.stringify(note));
+      ok('the note has them in the order they were sent (words, b, c, d), though they arrived d, b, words, c', /the words MODE:stdin\n\n!\[\[b\.png\]\]\n\n!\[\[c\.png\]\]\n\n!\[\[d\.png\]\]/.test(note), JSON.stringify(note));
       const answer = answerOf2(note);
       const at = (s) => answer.indexOf(s);
       ok('the agent gets the words, then the files in the order they were sent (b, c, d)', at('the words') >= 0 && at('file ./b.png') > at('the words') && at('file ./c.png') > at('file ./b.png') && at('file ./d.png') > at('file ./c.png'), answer);
@@ -2217,7 +2369,17 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       ok('read back from the note, a batch is in the order it was sent while it is remembered', same(payload.files, ['Inbox/b.png', 'Inbox/c.png', 'Inbox/d.png']) && payload.text === 'the words MODE:stdin' && payload.parts[0].text != null, JSON.stringify(payload.parts));
       delete p.settings.batchRuns[ID];
       const plain = await p.payloadOfNote({ path: notes[0], name: '', extension: 'md' });
-      ok('…and with nothing remembered, as the note has them', same(plain.files, ['Inbox/d.png', 'Inbox/b.png', 'Inbox/c.png']), JSON.stringify(plain.files));
+      ok('…and with nothing remembered, as the note has them (the same: the note is in the order it was sent)', same(plain.files, ['Inbox/b.png', 'Inbox/c.png', 'Inbox/d.png']), JSON.stringify(plain.files));
+      // A part that arrives in a later pull is put where its number says; a note whose parts cannot be found gets it at the end
+      const lateOne = await setup([[bt(530, 'second part', 2, 3)], [bt(531, 'first part', 1, 3)], [bt(532, 'third part', 3, 3)]]);
+      await pull(lateOne.p); await pull(lateOne.p); await pull(lateOne.p);
+      const lateNote = lateOne.files.get(notesIn(lateOne.files)[0]);
+      ok('parts arriving in separate pulls, as 2, 1, 3: written as 1, 2, 3', /first part\n\nsecond part\n\nthird part/.test(lateNote), JSON.stringify(lateNote));
+      const lost = await setup([[bt(540, 'second', 2, 3)], [bt(541, 'first', 1, 3)]]);
+      await pull(lost.p);
+      lost.p.settings.batches[ID].parts = [{ i: 2, head: 'text the user rewrote' }];
+      await pull(lost.p);
+      ok('the place of a part cannot be found any more (the note was edited): it goes at the end, nothing is lost', /second\n\nfirst/.test(lost.files.get(notesIn(lost.files)[0])), JSON.stringify(lost.files.get(notesIn(lost.files)[0])));
     }
     {
       const { p } = await setup([[]]);
@@ -2620,7 +2782,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     p.app.vault.readBinary = async (f) => { readOne = true; return readBinary(f); };
     notices.length = 0;
     await p.sendFiles([mk('g.bin', 6)]);
-    ok('a file over what the account allows for one item is refused before it is read or sent, saying how much', uploads().length === 0 && !readOne && notices.some((n) => n.includes('Larger than 5 MB')), JSON.stringify([uploads().length, readOne, notices]));
+    ok('a file over what the account allows for one item is refused before it is read or sent, saying how much', uploads().length === 0 && !readOne && notices.some((n) => n.includes('Over the 5 MB limit')), JSON.stringify([uploads().length, readOne, notices]));
     await p.sendFiles([mk('h.bin', 4)]);
     ok('…one under it goes', uploads().length === 1 && readOne);
     p.app.vault.readBinary = readBinary;
@@ -2748,7 +2910,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     await draw();
     ok('a desktop with no rule: one switch to turn it on, and nothing more to set yet', ui.toggles.some((x) => x.name === U.ai && x.value === false) && !ui.names.includes(U.agent) && !ui.names.includes(U.command) && thenCalls < 50, ui.names.join('|'));
     ok('the pairing code box says where the new device gets dropit, in both languages, around a link', [X.STRINGS.en, X.STRINGS.zh].every((l) => Array.isArray(l.codeInstall) && l.codeInstall.length === 2 && l.codeInstall[0].length > 15) && /^https:\/\/dropit\.smart-kits\.xyz\/#install$/.test(X.INSTALL_URL));
-    ok('…the groups: receiving (with "after it arrives" as its second part), sending, devices, advanced — each with a name', ['receiving', 'after', 'delivery', 'devices', 'advanced'].every((k) => U[k] && X.STRINGS.zh.set[k]));
+    ok('…the groups: receiving (with "after it arrives" as its second part), devices (with where a send goes by default), advanced — each with a name', ['receiving', 'after', 'devices', 'advanced'].every((k) => U[k] && X.STRINGS.zh.set[k]));
     const turnOn = ui.toggles.find((x) => x.name === U.ai);
     const turning = turnOn.change(true);
     await settle(); await settle();
@@ -2922,9 +3084,10 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     ok('…none of it left: back to all (empty), and it says how many went', same(X.reconcileTargets(['d_gone', 'd_old'], receiversOf), { ids: [], gone: 2 }));
     ok('…a chosen set that names every device stays a chosen set (a device added later is not in it); nothing saved is nothing lost', same(X.reconcileTargets(['d_b', 'd_a'], receiversOf), { ids: ['d_b', 'd_a'], gone: 0 }) && same(X.reconcileTargets([], receiversOf), { ids: [], gone: 0 }));
     ok('…one of the chosen gone, the rest naming every device that is left: still the rest, and it says one went', same(X.reconcileTargets(['d_a', 'd_b', 'd_gone'], receiversOf), { ids: ['d_a', 'd_b'], gone: 1 }));
-    ok('the folded line: All, the device\'s name, or how many', X.targetsSummary([], receiversOf) === 'All' && X.targetsSummary(['d_a'], receiversOf) === 'Pixel'
-      && X.targetsSummary(['d_a', 'd_b'], [...receiversOf, { device_id: 'd_z', name: 'Z' }]) === '2 devices' && X.targetsSummary(['d_a', 'd_b'], null) === '2 devices' && X.targetsSummary([], null) === 'All');
-    ok('…in Chinese too (全部 / 名字 / N 台)', Z.set.allDevices === '全部' && Z.set.deviceN(3) === '3 台' && Z.set.delivery === '投递' && Z.set.defaultTo === '默认投给' && Z.set.selectAll === '全选');
+    ok('the default in a few words: All, or how many of the devices there now', X.defaultLabel([], receiversOf) === 'All' && X.defaultLabel(['d_a'], receiversOf) === '1 device'
+      && X.defaultLabel(['d_a', 'd_b'], receiversOf) === '2 devices' && X.defaultLabel(['d_gone'], receiversOf) === 'All' && X.defaultLabel([], null) === 'All');
+    ok('…in Chinese too (全部 / N 台), and the heading, the column and the folded line have words in both', Z.set.allDevices === '全部' && Z.set.deviceN(3) === '3 台' && Z.set.defaultHead === '这台电脑默认投给：' && Z.set.defaultIs('全部') === '默认投给全部'
+      && U.defaultHead === 'This computer sends to by default:' && U.defaultIs('All') === 'Default: All' && !('selectAll' in U) && !('delivery' in U) && !('selectAll' in Z.set));
 
     // every slot in use: which device the new one replaces
     const full = { plan: 'free', devices_used: 4, devices_limit: 4 };
@@ -2971,16 +3134,17 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     {
       const { p, draw, groups } = await mk({});
       await draw();
-      ok('the groups, in this order: Receiving, Sending, Devices, Advanced', same(groups.map((g) => g.key), ['receiving', 'delivery', 'devices', 'advanced']) && groups.map((g) => g.title).join() === 'Receiving,Sending,Devices,Advanced', JSON.stringify(groups));
+      ok('the groups, in this order: Receiving, Devices, Advanced (no Sending group: the default lives in Devices)', same(groups.map((g) => g.key), ['receiving', 'devices', 'advanced']) && groups.map((g) => g.title).join() === 'Receiving,Devices,Advanced', JSON.stringify(groups));
       const at = (n) => ui.names.indexOf(n);
-      ok('Receiving holds how it is written, then (after the "After it arrives" part) the AI, the Obsidian command, and Pull again last', at(U.writeAs) < at(U.ai) && at(U.ai) < at(U.runCommand) && at(U.runCommand) < at(T.repull) && at(T.repull) < at(U.defaultTo), ui.names.join('|'));
-      ok('Sending comes next, then Devices (add a device … Unpair as its last row, drawn after the list), then Advanced (the rows of the device list itself come from the service, a moment later)', at(U.defaultTo) < at(T.addDevice) && at(T.addDevice) < at(T.unpair) && at(T.unpair) < at(T.serverAddress), ui.names.join('|'));
-      ok('Advanced is only the server address: Pull again and Unpair are not in it', at(T.serverAddress) > at(T.unpair) && ui.names.filter((n) => n === T.serverAddress).length === 1 && ui.names.filter((n) => n === T.repull).length === 1 && ui.names.filter((n) => n === T.unpair).length === 1);
-      ok('"Pull again" is one row, in Receiving: it is drawn before the Sending rows', ui.dropdowns.some((d) => d.name === T.repull) && at(T.repull) < at(U.defaultTo));
-      ok('Unpair says what happens, in the same words as the confirmation (this computer leaves; the others are not affected)', /other devices are not affected/.test(T.unpairDesc) && /其他设备不受影响/.test(Z.unpairDesc) && /other devices are not affected/.test(T.unpairAsk) && /其他设备不受影响/.test(Z.unpairAsk));
+      ok('Receiving holds how it is written, then (after the "After it arrives" part) the AI, the Obsidian command, and Pull again last', at(U.writeAs) < at(U.ai) && at(U.ai) < at(U.runCommand) && at(U.runCommand) < at(T.repull) && at(T.repull) < at(T.addDevice), ui.names.join('|'));
+      ok('Devices: add a device, then the default line, then the rows (this computer first; they are drawn when the list comes from the service, after Advanced)', at(T.addDevice) < at(T.serverAddress) && at(U.defaultHead) < at('My Mac') && at('My Mac') < at('Pixel') && at('Pixel') < at('Linux'), ui.names.join('|'));
+      ok('Advanced is only the server address; there is no Unpair row any more, and Pull again is one row', ui.names.filter((n) => n === T.serverAddress).length === 1 && ui.names.filter((n) => n === T.repull).length === 1 && !ui.names.includes('Unpair') && !ui.names.includes('解除配对'));
+      ok('"Pull again" is one row, in Receiving: it is drawn before the Devices rows', ui.sliders.some((d) => d.row.name === T.repull) && at(T.repull) < at(T.addDevice));
+      const ends = ui.buttons.filter((b) => [T.signOut, T.remove].includes(b.text));
+      ok('the end of each row: Sign out on this computer, Remove on every other device (the send-only one too)', ends.map((b) => `${b.name}:${b.text}`).join() === 'My Mac:Sign out,Pixel:Remove,Linux:Remove,Shortcut:Remove', JSON.stringify(ends));
+      ok('"Select all" is gone', ui.links.length === 0);
       ok('one row per other device that can receive, each a native checkbox, all ticked by default: this vault and a send-only device are not offered', ui.checks.map((c) => c.name).join() === 'Pixel,Linux' && ui.checks.every((c) => c.type === 'checkbox' && c.checked), JSON.stringify(ui.checks.map((c) => [c.name, c.checked])));
-      ok('…its summary is All', groups.find((g) => g.key === 'delivery').summary === 'All' && p.settings.targets.length === 0);
-      ok('…and the select-all link is there', ui.links.length === 1 && ui.links[0].text === U.selectAll && ui.links[0].shown === true);
+      ok('…the folded line says how many devices and that the default is all', groups.find((g) => g.key === 'devices').summary === '4 devices · Default: All' && p.settings.targets.length === 0, groups.find((g) => g.key === 'devices').summary);
     }
 
     {
@@ -2991,22 +3155,20 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       pixel.checked = false;
       pixel.on.change(); await settle(); await settle();
       ok('unticking one saves at once, to data.json: only that device is left', same(p.settings.targets, ['d_b']) && same(p.stored.targets, ['d_b']), JSON.stringify(p.stored.targets));
-      ok('…and the folded line becomes its name', r.groups.find((g) => g.key === 'delivery').summary === 'Linux');
+      ok('…and the folded line becomes one device', r.groups.find((g) => g.key === 'devices').summary === '4 devices · Default: 1 device');
       linux.checked = false;
       linux.on.change(); await settle(); await settle();
-      ok('the last one cannot be unticked: it stays ticked, nothing is saved, and the line says to keep one (or select all)', linux.checked === true && same(p.stored.targets, ['d_b']) && r.warn.at(-1) === U.keepOne && /select all/.test(U.keepOne) && /1 台/.test(Z.set.keepOne) && /全选/.test(Z.set.keepOne), JSON.stringify(r.warn));
+      ok('the last one cannot be unticked: it stays ticked, nothing is saved, and the line says to keep one (or tick them all)', linux.checked === true && same(p.stored.targets, ['d_b']) && r.warn.at(-1) === U.keepOne && /tick them all/.test(U.keepOne) && /1 台/.test(Z.set.keepOne) && /全部勾上/.test(Z.set.keepOne), JSON.stringify(r.warn));
       pixel.checked = true;
       pixel.on.change(); await settle(); await settle();
-      ok('ticking every box again is "all": nothing is stored, the warning is cleared', p.settings.targets.length === 0 && p.stored.targets.length === 0 && r.warn.lastIndexOf('') > r.warn.lastIndexOf(U.keepOne) && r.groups.find((g) => g.key === 'delivery').summary === 'All');
+      ok('ticking every box again is "all": nothing is stored, the warning is cleared', p.settings.targets.length === 0 && p.stored.targets.length === 0 && r.warn.lastIndexOf('') > r.warn.lastIndexOf(U.keepOne) && r.groups.find((g) => g.key === 'devices').summary === '4 devices · Default: All');
       pixel.checked = false; pixel.on.change(); await settle(); await settle();
       ok('(one left again)', same(p.settings.targets, ['d_b']) && linux.checked === true && pixel.checked === false);
-      ui.links[0].on.click({ preventDefault() {} }); await settle(); await settle();
-      ok('"Select all" sets the default back to all and ticks every box', p.settings.targets.length === 0 && p.stored.targets.length === 0 && ui.checks.every((c) => c.checked));
       // two of three: how many
       const three = await mk({}, [...devs, { device_id: 'd_z', name: 'Tablet', scope: 'full' }]);
       await three.draw();
       ui.checks[2].checked = false; ui.checks[2].on.change(); await settle(); await settle();
-      ok('two of three others: the folded line says how many, and the saved list names exactly those two', three.groups.find((g) => g.key === 'delivery').summary === '2 devices' && same(three.p.settings.targets, ['d_a', 'd_b']));
+      ok('two of three others: the folded line says how many, and the saved list names exactly those two', three.groups.find((g) => g.key === 'devices').summary === '5 devices · Default: 2 devices' && same(three.p.settings.targets, ['d_a', 'd_b']));
     }
 
     {
@@ -3014,7 +3176,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       notices.length = 0;
       await gone.draw();
       ok('a device removed since last time comes off the default when the page opens, with one Notice, and is saved', same(gone.p.settings.targets, ['d_a']) && same(gone.p.stored.targets, ['d_a']) && notices.filter((n) => n === T.targetsPruned(1, false)).length === 1, JSON.stringify([notices, gone.p.settings.targets]));
-      ok('…the rows show what is left: Pixel ticked, Linux not, and the folded line names Pixel', gone.groups.find((g) => g.key === 'delivery').summary === 'Pixel' && same(ui.checks.map((c) => [c.name, c.checked]), [['Pixel', true], ['Linux', false]]));
+      ok('…the rows show what is left: Pixel ticked, Linux not, and the folded line says one device', gone.groups.find((g) => g.key === 'devices').summary === '4 devices · Default: 1 device' && same(ui.checks.map((c) => [c.name, c.checked]), [['Pixel', true], ['Linux', false]]));
       notices.length = 0;
       await gone.draw();
       ok('…and the next time nothing is said again', notices.length === 0);
@@ -3027,40 +3189,43 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     {
       const alone = await mk({}, [devs[0], devs[3]]);
       await alone.draw();
-      ok('no other device that can receive: no checkboxes and no select-all, a line says what to do instead', ui.checks.length === 0 && ui.links.every((l) => !l.shown) && /No other device can receive/.test(U.noOthers) && /还没有其他能接收的设备/.test(Z.set.noOthers), JSON.stringify(ui.checks));
-      const one = await mk({}, [devs[0], devs[1]]);
+      ok('no other device that can receive: no title line, no ticks — the whole default is absent', ui.checks.length === 0 && !ui.names.includes(U.defaultHead) && alone.groups.find((g) => g.key === 'devices').summary === '2 devices', JSON.stringify(ui.names));
+      const one = await mk({ targets: ['d_a'] }, [devs[0], devs[1]]);
       await one.draw();
-      ok('one other device: still the list, with that one row ticked', ui.checks.length === 1 && ui.checks[0].name === 'Pixel' && ui.checks[0].checked);
-      ui.checks[0].checked = false; ui.checks[0].on.change(); await settle(); await settle();
-      ok('…and it is the last one: it cannot be unticked', ui.checks[0].checked === true && one.p.settings.targets.length === 0 && one.warn.at(-1) === U.keepOne);
+      ok('one other device that can receive: still no default (nothing to choose); a stale one is cleared so a device that joins later is included', ui.checks.length === 0 && !ui.names.includes(U.defaultHead) && one.p.settings.targets.length === 0 && one.p.stored.targets.length === 0);
+      ok('…the rows are still there, with Sign out and Remove', ui.buttons.filter((b) => [T.signOut, T.remove].includes(b.text)).map((b) => b.text).join() === 'Sign out,Remove');
+      const sendOnly = await mk({}, [...devs, { device_id: 'd_z', name: 'Tablet', scope: 'full' }]);
+      await sendOnly.draw();
+      ok('a send-only device has no tick, and this computer has none either: ticks only for the devices that can receive', ui.checks.map((c) => c.name).join() === 'Pixel,Linux,Tablet');
     }
 
     {
       // unpaired: setup, and the server address (it has to be changeable before pairing)
       const { p, draw, groups } = await mk({ token: '' });
       await draw();
-      ok('not paired: the setup rows and Advanced with the server address — no sending, no devices, no Unpair', same(groups.map((g) => g.key), ['advanced']) && ui.names.includes(T.haveCode) && ui.names.includes(T.serverAddress)
-        && ![U.defaultTo, T.addDevice, T.unpair, T.repull, U.writeAs].some((n) => ui.names.includes(n)) && ui.checks.length === 0 && p.settings.token === '', ui.names.join('|'));
+      ok('not paired: the setup rows and Advanced with the server address — no default, no devices, no Sign out', same(groups.map((g) => g.key), ['advanced']) && ui.names.includes(T.haveCode) && ui.names.includes(T.serverAddress)
+        && ![U.defaultHead, T.addDevice, T.signOut, T.repull, U.writeAs].some((n) => ui.names.includes(n)) && ui.checks.length === 0 && p.settings.token === '', ui.names.join('|'));
     }
 
-    // Unpair asks first
+    // Sign out asks first
     {
       const r = await mk({ targets: ['d_a'] });
       const { p } = r;
       await r.draw();
-      const button = ui.buttons.find((b) => b.name === T.unpair);
-      ok('Unpair is a button in Devices, labelled for what it does', !!button && button.text === T.unpairButton);
+      const button = ui.buttons.find((b) => b.text === T.signOut);
+      ok('Sign out is the button at the end of this computer\'s row', !!button && button.name === 'My Mac');
       button.click();
       const ask = ui.opened.find((m) => m instanceof X.Confirm);
       ok('pressing it asks first: nothing is sent to the service, this vault is still paired', !!ask && !r.apiCalls.some((c) => c.startsWith('DELETE')) && p.settings.token === 'dk_x');
-      ok('…the question says this computer leaves the account, the other devices are not affected, and that pairing is needed to come back', ask.message === T.unpairAsk && /^This computer leaves the account/.test(ask.message) && /pair again/.test(ask.message) && ask.title === T.unpairTitle && ask.yes === T.unpairYes
-        && Z.unpairAsk.startsWith('这台电脑会退出账号') && /重新配对/.test(Z.unpairAsk) && Z.unpairYes === '解除配对');
+      ok('…the question says what stays and what goes, in both languages', ask.message === T.signOutAsk && ask.title === 'Sign out of this device?' && ask.yes === 'Sign out'
+        && /notes already in your vault and your settings stay/.test(ask.message) && /join again with a pairing code/.test(ask.message) && /default devices are cleared/.test(ask.message)
+        && Z.signOutTitle === '退出这台设备？' && Z.signOut === '退出' && /已写入的笔记和插件设置会保留/.test(Z.signOutAsk) && /配对码重新加入/.test(Z.signOutAsk) && !/解除配对|Unpair/i.test(JSON.stringify([T, Z]).replace(/unpaired|not paired/gi, '')));
       ask.close();
       await settle();
       ok('closing it (Cancel) changes nothing', !r.apiCalls.some((c) => c.startsWith('DELETE')) && p.settings.token === 'dk_x' && same(p.settings.targets, ['d_a']));
       ask.onYes();
       for (let i = 0; i < 6; i++) await settle();
-      ok('confirming unpairs: this device is removed from the account, the sign-in and the default are forgotten here', r.apiCalls.includes('DELETE /v1/devices/d_me') && p.settings.token === '' && p.settings.targets.length === 0 && p.stored.targets.length === 0, JSON.stringify(r.apiCalls));
+      ok('confirming signs out: this device is removed from the account, the sign-in and the default are forgotten here', r.apiCalls.includes('DELETE /v1/devices/d_me') && p.settings.token === '' && p.settings.targets.length === 0 && p.stored.targets.length === 0, JSON.stringify(r.apiCalls));
     }
 
     // sending: with and without `to`
@@ -3129,7 +3294,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     for (const [u, want] of [["https://dropit.example/upgrade?u=1", "https://dropit.example/upgrade?u=1"], ["http://127.0.0.1:8799/upgrade", "http://127.0.0.1:8799/upgrade"], ["http://localhost:8780/x", "http://localhost:8780/x"], ["javascript:alert(1)", null], ["data:text/html,<b>x</b>", null], ["file:///etc/passwd", null], ["obsidian://open?vault=x", null], ["http://evil.example/up", null], ["//evil.example/x", null], ["", null], [null, null]]) ok(`a link from the service: ${String(u).slice(0, 40)}`, safeLink(u) === want, String(safeLink(u)));
     const en = STRINGS.en, zh = STRINGS.zh;
     const at = new Date(2026, 9, 4, 22, 15).getTime();
-    ok('too large: the limit from the answer', errorText('PAYLOAD_TOO_LARGE', { field: 'size', limit: 5242880 }, 413, en) === 'Larger than 5 MB, the most one item can be');
+    ok('too large: the limit from the answer', errorText('PAYLOAD_TOO_LARGE', { field: 'size', limit: 5242880 }, 413, en) === 'Over the 5 MB limit for one item');
     ok('too large, zh, fractional', errorText('PAYLOAD_TOO_LARGE', { field: 'size', limit: 1572864 }, 413, zh) === '超过了单条上限 1.5 MB');
     ok('today\'s sends: when it is back', errorText('RATE_LIMITED', { window: 'day', retry_after: 7200 }, 429, en, at) === "Today's sends are used up — back at 00:15");
     ok('signup limit: how many and when it opens again, zh too, and the plain sentence without a time', /5 accounts/.test(errorText('SIGNUP_LIMITED', { retry_after: 1800, limit: 5 }, 429, en, at)) && /5 个账号/.test(errorText('SIGNUP_LIMITED', { retry_after: 1800, limit: 5 }, 429, zh, at)) && errorText('SIGNUP_LIMITED', {}, 429, en, at) === en.errors.SIGNUP_LIMITED);
@@ -3137,8 +3302,8 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       && errorText('RATE_LIMITED', { window: 'day', field: 'downloads', retry_after: 90 }, 429, zh, at) === '今天的下载次数用完了，22:16 恢复');
     ok('this hour', errorText('RATE_LIMITED', { window: 'hour' }, 429, en) === en.rateHour);
     ok('older service: the plain sentence', errorText('RATE_LIMITED', { retry_after: 30 }, 429, en) === en.errors.RATE_LIMITED);
-    ok('space full: when room frees up', errorText('QUOTA_EXCEEDED', { field: 'bytes', frees_in: 7200 }, 507, en) === 'Storage is full — the oldest item expires in about 2 hours and frees up room');
-    ok('queue full, zh: when room frees up', errorText('QUOTA_EXCEEDED', { field: 'items', frees_in: 90000 }, 507, zh) === '积压的内容太多了，最早的一条约 25 小时后到期，到时自动腾出位置');
+    ok('space full: when room frees up', errorText('QUOTA_EXCEEDED', { field: 'bytes', frees_in: 7200 }, 507, en) === 'Your space is full — the oldest item expires in about 2 hours and frees up room');
+    ok('queue full, zh: when room frees up', errorText('QUOTA_EXCEEDED', { field: 'items', frees_in: 90000 }, 507, zh) === '排队等收的内容太多了，最早的一条约 25 小时后到期，到时自动腾出位置');
     ok('space full without a time: the plain sentence', errorText('QUOTA_EXCEEDED', { field: 'bytes' }, 507, en) === en.quotaBytes);
     ok('a code with no special case: the table, then HTTP', errorText('INVALID_TOKEN', {}, 401, en) === en.errors.INVALID_TOKEN && errorText('NOPE', {}, 502, en) === en.httpFailed(502));
     const err = apiError(429, { error: 'RATE_LIMITED', window: 'day', retry_after: 90, upgrade_url: 'https://x.test/up', why: 'per_day' });
@@ -3154,6 +3319,295 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     errorNotice('dropit: Sending too fast', err);
     ok('a link from the service: the sentence and the way past it, and it stays long enough to click', lastNotice.m.text[0] === 'dropit: Sending too fast'
       && lastNotice.m.links[0].text === en.upgradeFor('per_day') && lastNotice.m.links[0].href === 'https://x.test/up?src=obsidian' && lastNotice.ms >= 12_000, JSON.stringify([lastNotice.m.text, lastNotice.m.links, lastNotice.ms]));
+  }
+
+  console.log('── Round 1022: an address the user chose is never replaced by the built-in one ──');
+  {
+    const hosts = (calls) => [...new Set(calls.filter((c) => c.auth === 'Bearer dk_x').map((c) => c.host))];
+    // Chosen in the settings (flag set): the address is the only one, and nothing — token included — goes anywhere else
+    const own = (await makePlugin({ endpoints: ['https://mine.example'], ownEndpoint: true })).p;
+    ok('a chosen address is the only one tried', JSON.stringify(own.endpointList()) === '["https://mine.example"]', JSON.stringify(own.endpointList()));
+    const calls = serve({ 'GET /v1/me': () => new Error('getaddrinfo ENOTFOUND') });
+    let err = null;
+    try { await own.api('GET', '/v1/me'); } catch (e) { err = e; }
+    ok('it is down: the error says it cannot be reached, and the built-in address saw nothing', err && /Can't reach/.test(err.message) && !hosts(calls).includes('dropit.smart-kits.xyz') && own.settings.endpoints[0] === 'https://mine.example', JSON.stringify(hosts(calls)));
+    const learn = serve({ 'GET /v1/endpoints': () => ({ json: { endpoints: ['https://dropit.smart-kits.xyz'] } }) });
+    await own.refreshEndpoints();
+    ok('nothing is learned from a chosen address (the list stays as it was, no request)', learn.length === 0 && JSON.stringify(own.settings.endpoints) === '["https://mine.example"]', JSON.stringify(own.settings.endpoints));
+    // An address that is not safe to send the key to: still nothing goes to the built-in one
+    const unsafe = (await makePlugin({ endpoints: ['http://evil.example'], ownEndpoint: true })).p;
+    const c2 = serve({ 'GET /v1/me': () => ({ json: {} }) });
+    let e2 = null;
+    try { await unsafe.api('GET', '/v1/me'); } catch (e) { e2 = e; }
+    ok('an unsafe chosen address: refused, nothing sent at all', e2 && c2.length === 0, String(c2.length));
+    // Set up before the flag existed: addresses on this machine only count as chosen
+    const local = (await makePlugin({ endpoints: ['http://127.0.0.1:8790'] })).p;
+    const c3 = serve({ 'GET /v1/me': () => new Error('ECONNREFUSED') });
+    await local.api('GET', '/v1/me').catch(() => {});
+    ok('an older vault pointing at this machine: no fallback either', hosts(c3).join() === '127.0.0.1:8790' && local.endpointList().length === 1, JSON.stringify(hosts(c3)));
+    // The default setup keeps healing itself (the flag is off, or never set)
+    const dflt = (await makePlugin({ endpoints: ['https://old.example.com'], ownEndpoint: false })).p;
+    ok('not chosen: the built-in address stays last', dflt.endpointList().at(-1) === 'https://dropit.smart-kits.xyz', JSON.stringify(dflt.endpointList()));
+  }
+
+  console.log('── Round 1022: refusal sentences ──');
+  {
+    const { errorText, STRINGS: S } = DropitPlugin;
+    const text1 = errorText('PAYLOAD_TOO_LARGE', { field: 'raw', limit: 1 << 20 }, 413, S.en);
+    ok('a text too long says it is a text and the limit, not the plan', /text/i.test(text1) && /1 MB/.test(text1) && !/plan/i.test(text1), text1);
+    ok('…and in Chinese', /文字/.test(errorText('PAYLOAD_TOO_LARGE', { field: 'raw', limit: 1 << 20 }, 413, S.zh)) && /1 MB/.test(errorText('PAYLOAD_TOO_LARGE', { field: 'raw', limit: 1 << 20 }, 413, S.zh)));
+    ok('the plain table sentence no longer blames the plan', !/plan|套餐/i.test(S.en.errors.PAYLOAD_TOO_LARGE) && !/套餐/.test(S.zh.errors.PAYLOAD_TOO_LARGE));
+    const pairing = errorText('RATE_LIMITED', { window: 'day', field: 'pairings', retry_after: 90 }, 429, S.en);
+    ok('too many devices joined today: says so, not "sends are used up"', /devices/.test(pairing) && !/sends/.test(pairing), pairing);
+    ok('…and in Chinese', /设备/.test(errorText('RATE_LIMITED', { window: 'day', field: 'pairings', retry_after: 90 }, 429, S.zh)));
+    ok('a send over the day is still about sends', /sends/.test(errorText('RATE_LIMITED', { window: 'day', retry_after: 90 }, 429, S.en)));
+  }
+
+  console.log('── Round 1022: the ways to Paid ──');
+  {
+    const { upgradeLink, withWhy } = DropitPlugin;
+    const me = { upgrade_url: 'https://x.test/upgrade?u=1&s=2&why=account&buy=year' };
+    ok('the account link, said to be about devices: why is rewritten, buy= taken off, the rest kept, tagged once',
+      upgradeLink(me, 'devices') === 'https://x.test/upgrade?u=1&s=2&why=devices&src=obsidian', upgradeLink(me, 'devices'));
+    ok('without a why the link is as the service gave it (minus any buy=)', upgradeLink(me).includes('why=account'));
+    ok('a link with no why gets one', withWhy('https://x.test/u?a=1#f', 'devices') === 'https://x.test/u?a=1&why=devices#f');
+    // A free account sending a file over its limit: stopped before it is read, told what Paid takes, with the link
+    const free = (await makePlugin()).p;
+    free.meCache = { at: Date.now(), m: { plan: 'free', item_bytes_limit: 10 << 20, upgrade_url: 'https://x.test/upgrade?u=1&s=2&why=account&buy=year' } };
+    free.plansCache = { at: Date.now(), plans: { limits: { paid: { fileMB: 100 } } } };
+    let reads = 0;
+    free.app.vault.readBinary = async () => { reads++; return new ArrayBuffer(8); };
+    notices.length = 0;
+    await free.sendFiles([{ path: 'big11.pdf', name: 'big11.pdf', extension: 'pdf', stat: { size: 11 << 20 } }]);
+    ok('a free account, a file over 10 MB: the limit, what Paid takes, and the link (why=file_size, tagged once)',
+      reads === 0 && /big11\.pdf/.test(notices[0]) && /10 MB/.test(notices[0]) && /100 MB/.test(notices[0])
+      && lastNotice.m.links?.[0]?.href === 'https://x.test/upgrade?u=1&s=2&why=file_size&src=obsidian' && lastNotice.m.links[0].text === DropitPlugin.STRINGS.en.upgradeFor('file_size'), JSON.stringify([notices, lastNotice.m.links]));
+    notices.length = 0;
+    await free.sendFiles([{ path: 'huge.mov', name: 'huge.mov', extension: 'mov', stat: { size: 150 << 20 } }]);
+    ok('a file past what Paid takes too: the reason only', typeof lastNotice.m === 'string' && !/Paid takes/.test(notices[0]), JSON.stringify(notices));
+    const paid = (await makePlugin()).p;
+    paid.meCache = { at: Date.now(), m: { plan: 'paid', item_bytes_limit: 100 << 20 } };
+    notices.length = 0;
+    await paid.sendFiles([{ path: 'a.mov', name: 'a.mov', extension: 'mov', stat: { size: 150 << 20 } }]);
+    ok('a paid account gets no Paid suggestion', typeof lastNotice.m === 'string' && !/Paid/.test(notices[0]), JSON.stringify(notices));
+  }
+
+  console.log('── Round 1022: joining a full account stays on the page ──');
+  {
+    const { p } = await makePlugin({ token: '' }, { token: '' });
+    const lines = [];
+    const note = { empty() { lines.length = 0; }, createDiv: (o) => { lines.push(o.text); return el(); }, createEl: (tag, o) => { lines.push(o); return { addEventListener() {} }; } };
+    p.tab.joinNote = note;
+    serve({ 'POST /v1/pair/claim': () => ({ status: 403, json: { error: 'DEVICE_LIMIT_REACHED', limit: 2, upgrade_url: 'https://x.test/upgrade?u=1&s=2&why=devices&buy=year', why: 'devices' } }),
+      'GET /v1/plans': () => ({ json: { limits: { paid: { devices: 10 } } } }) });
+    notices.length = 0;
+    await p.tab.join('K7M2QX');
+    const link = lines.find((l) => typeof l === 'object');
+    ok('refused for devices: a line stays under the field (no Notice), with the reason', notices.length === 0 && /Device limit/.test(lines[0]), JSON.stringify([notices, lines]));
+    ok('…and a link that says how many Paid allows, with why=devices', link && link.text === DropitPlugin.STRINGS.en.slotUpgradeN(10) && /why=devices/.test(link.href) && /Up to 10|up to 10/.test(link.text), JSON.stringify(link));
+    serve({ 'POST /v1/pair/claim': () => ({ status: 400, json: { error: 'PAIRING_CODE_INVALID' } }) });
+    await p.tab.join('K7M2QX');
+    ok('another refusal is a Notice as before, and the line is cleared', notices.length === 1 && lines.length === 0, JSON.stringify([notices, lines]));
+  }
+
+  console.log('── Round 1022: arrivals ──');
+  {
+    const { p } = await makePlugin();
+    serve({ 'GET /v1/pull': pages([text(301, 'one')]) });
+    notices.length = 0;
+    await p.sync(false);
+    serve({ 'GET /v1/pull': pages([text(302, 'two'), text(303, 'three')]) });
+    await p.sync(false);
+    ok('items arriving one sync after another: the Notice counts them all instead of stacking', notices.at(-1).includes('received 3 items'), JSON.stringify(notices));
+    const hidden = [];
+    const keep = p.arrival.notice; keep.hide = () => hidden.push(1);
+    serve({ 'GET /v1/pull': pages([text(304, 'four')]) });
+    await p.sync(false);
+    ok('…and the earlier one is taken down', hidden.length === 1 && notices.at(-1).includes('received 4 items'), JSON.stringify([hidden, notices]));
+    // Pulling again is not an arrival
+    serve({ 'GET /v1/pull': pages([text(301, 'one'), text(305, 'five')]), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+    notices.length = 0;
+    await p.repull('all');
+    ok('Pull again says how many came back, not that something was received', notices.length === 1 && /pulled back 1 item/.test(notices[0]) && !/received/.test(notices[0]), JSON.stringify(notices));
+    ok('…in Chinese too', /拉回了 3 条/.test(DropitPlugin.STRINGS.zh.pulledBack(3)));
+  }
+
+  console.log('── Round 1022: note names ──');
+  {
+    const { noteTitle } = DropitPlugin;
+    ok('text that starts with --- is named after its first line that says something', noteTitle(text(310, '---\ntitle: Plan for May\n---\nbody')) === '09-17 08.00 title_ Plan for May', noteTitle(text(310, '---\ntitle: Plan for May\n---\nbody')));
+    ok('a divider and blank lines first, then a Chinese line', noteTitle(text(311, '---\n\n***\n会议纪要\n')) === '09-17 08.00 会议纪要', noteTitle(text(311, '---\n\n***\n会议纪要\n')));
+    ok('only dividers: the time alone, as before', noteTitle(text(312, '---\n---')) === '09-17 08.00', noteTitle(text(312, '---\n---')));
+  }
+
+  console.log('── Round 1022: keyboard ──');
+  {
+    const made = [];
+    const host = { createSpan: () => { const i = { attrs: {}, on: {}, setAttribute(k, v) { i.attrs[k] = v; }, addEventListener(ev, fn) { i.on[ev] = fn; } }; made.push(i); return i; } };
+    const { p } = await makePlugin();
+    p.tab.tip({ nameEl: host }, 'what it does');
+    const i = made[0];
+    notices.length = 0;
+    i?.on.keydown?.({ key: 'Enter', preventDefault() {}, stopPropagation() {} });
+    ok('the (i) can be Tabbed to and opened with Enter', i?.attrs.tabindex === '0' && i.attrs.role === 'button' && notices.includes('what it does'), JSON.stringify([i?.attrs, notices]));
+  }
+
+  console.log('── Round 1022b: the account line, tab order, pulling again, accounts, plan change ──');
+  {
+    // OBS-NEW-1: the answer goes to the line that is on the page when it comes
+    const { p } = await makePlugin();
+    const row = () => { const r = { descs: [], setDesc(d) { r.descs.push(d); return r; }, descEl: null, setName() {}, settingEl: {} }; return r; };
+    const first = row(); const second = row();
+    let answer;
+    p.api = () => new Promise((r) => { answer = r; });
+    p.refreshUpsell = () => {}; p.accountMoments = async () => {};
+    const tab = p.tab;
+    tab.stateSetting = first; tab.onStatus = () => {};
+    tab.loadAccount();
+    tab.stateSetting = second;                 // the page is drawn again while the first read is on its way
+    tab.loadAccount();                         // …and its own read waits for the first
+    answer({ plan: 'free', devices_used: 1, devices_limit: 2 });
+    await settle();
+    ok('the page was drawn again: the answer lands on the line that is there now', second.descs.length === 1 && first.descs.length === 0 && !/Loading|正在读取/.test(second.descs[0]), JSON.stringify([first.descs, second.descs]));
+    ok('…and is kept, so a line drawn later shows it at once', tab.accountRead?.plan === 'free');
+    // OBS-NEW-6: a read that shows Paid lifts a stop that was for the trial
+    const q = (await makePlugin()).p;
+    let connected = 0;
+    q.connect = () => { connected++; };
+    Object.assign(q, { noRealtime: true, realtimeWhy: 'trial_over', realtimeUntil: 123 });
+    q.planSeen({ plan: 'free' });
+    ok('still free: nothing changes', q.noRealtime === true && connected === 0);
+    q.planSeen({ plan: 'paid' });
+    ok('Paid seen: the stop is lifted and the connection is tried at once', q.noRealtime === false && q.realtimeWhy === null && q.realtimeUntil === null && connected === 1, JSON.stringify([q.noRealtime, connected]));
+    // OBS-NEW-2: rows and boxes are not Tab stops
+    const marked = [];
+    p.tab.containerEl = { querySelectorAll: () => [{ setAttribute: (k, v) => marked.push([k, v]) }, { setAttribute: (k, v) => marked.push([k, v]) }] };
+    p.tab.tabOrder();
+    ok('rows and boxes are taken out of the Tab order', marked.length === 2 && marked.every(([k, v]) => k === 'tabindex' && v === '-1'), JSON.stringify(marked));
+  }
+  {
+    // OBS-NEW-4: pulling again writes the notes and hands nothing to the AI rules
+    const { p } = await makePlugin();
+    const handed = [];
+    p.runAuto = async (list) => { handed.push(list.length); };
+    serve({ 'GET /v1/pull': pages([text(401, 'a'), text(402, 'b')]) });
+    await p.sync(false);
+    await p.hookQueue;
+    serve({ 'GET /v1/pull': pages([text(401, 'a'), text(402, 'b'), text(403, 'c')]), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+    handed.length = 0;
+    await p.repull('all');
+    await p.hookQueue;
+    for (let i = 0; i < 5; i++) await settle();
+    ok('Pull again: nothing is handed to the rules', handed.every((n) => n === 0), JSON.stringify(handed));
+    serve({ 'GET /v1/pull': pages([text(404, 'd')]) });
+    handed.length = 0;
+    await p.sync(false);
+    await p.hookQueue;
+    for (let i = 0; i < 5; i++) await settle();
+    ok('a normal arrival afterwards is handed over as before', handed.includes(1), JSON.stringify(handed));
+  }
+  {
+    // OBS-NEW-5: a note of another account is not this account's item with the same number
+    const { p, files, fm } = await makePlugin();
+    p.settings.accountTag = 'aaaa1111';
+    serve({ 'GET /v1/pull': pages([text(10, 'from the first account')]) });
+    await p.sync(false);
+    const note = [...files.keys()].find((k) => k.includes('first account'));
+    ok('a new note carries the account mark (8 hex), not the account itself', /^---[\s\S]*?\ndropit_account: "?aaaa1111"?\n/.test(files.get(note)), files.get(note));
+    p.settings.accountTag = 'bbbb2222';
+    serve({ 'GET /v1/pull': pages([text(10, 'from the second account')]) });
+    p.settings.cursor = 0;
+    await p.sync(false);
+    ok('the same vault, another account, the same number: written, not taken for existing', [...files.keys()].some((k) => k.includes('second account')), [...files.keys()].join());
+    // a note without the mark (from before) still counts, by number alone
+    const old = (await makePlugin()).p;
+    const o = await makePlugin();
+    o.p.settings.accountTag = 'cccc3333';
+    serve({ 'GET /v1/pull': pages([text(20, 'old note')]) });
+    await o.p.sync(false);
+    const oldPath = [...o.files.keys()].find((k) => k.includes('old note'));
+    o.files.set(oldPath, o.files.get(oldPath).replace(/dropit_account: .*\n/, ''));
+    const meta = o.fm.get(oldPath); if (meta) delete meta.dropit_account;
+    serve({ 'GET /v1/pull': pages([text(20, 'old note')]), 'POST /v1/cursor/reset': () => ({ json: { ok: true, to_seq: 0 } }) });
+    await o.p.repull('all');
+    ok('a note with no mark counts as before: not written twice', [...o.files.keys()].filter((k) => k.includes('old note')).length === 1, [...o.files.keys()].join());
+    void old;
+  }
+
+  console.log('── Round 1022c: consent lines at joining and creating ──');
+  {
+    const { p } = await makePlugin({ token: '' }, { token: '' });
+    const got = [];
+    p.tab.containerEl = { createDiv: () => { const l = { text: '', links: [], appendText(x) { l.text += x; }, createEl: (tag, o) => { l.links.push(o); return { addEventListener() {} }; } }; got.push(l); return l; } };
+    const S = DropitPlugin.STRINGS;
+    p.tab.consentLine(S.en.consentJoin);
+    ok('a line says what joining sends, with the privacy page of the service in use', /fingerprint hash/.test(got[0].text) && got[0].links[0].text === 'Privacy' && got[0].links[0].href === 'https://dropit.smart-kits.xyz/privacy', JSON.stringify(got[0]));
+    p.settings.endpoints = ['https://mine.example'];
+    p.settings.ownEndpoint = true;
+    p.tab.consentLine(S.zh.consentCreate);
+    ok('…with a server address typed in, its own privacy page', got[1].links[0].href === 'https://mine.example/privacy' && S.zh.privacyLink === '隐私说明' && /设备指纹摘要/.test(got[1].text), JSON.stringify(got[1]));
+    ok('both lines, both languages', ['consentJoin', 'consentCreate', 'privacyLink'].every((k) => S.en[k] && S.zh[k]));
+    const real = await makePlugin({ token: '' }, { token: '' });
+    let lines = 0;
+    const orig = real.p.tab.consentLine; real.p.tab.consentLine = function (x) { lines++; return orig.call(this, x); };
+    real.p.tab.containerEl = anything();
+    real.p.tab.display();
+    ok('the not-paired page has one under Join and one under Create', lines === 2, String(lines));
+  }
+
+  console.log('── Round 1022d: an account mark that looks like a number ──');
+  {
+    const { sameAccountMark } = DropitPlugin;
+    ok('a mark compares as the number YAML made of it, and as text otherwise', sameAccountMark(5092591, '05092591') && sameAccountMark(100000, '1e5') && sameAccountMark('a1b2c3d4', 'a1b2c3d4') && sameAccountMark('05092591', '05092591')
+      && !sameAccountMark(5092592, '05092591') && !sameAccountMark('b1b2c3d4', 'a1b2c3d4') && !sameAccountMark(5, 'a1b2c3d4') && sameAccountMark(parseInt('01234567', 8), '01234567'));
+    for (const [label, tag, legacy] of [['digits with a leading 0', '05092591', 5092591], ['the form 1e5', '1e5', 100000], ['digits and letters', 'c0ffee11', 'c0ffee11']]) {
+      const { p, files, fm } = await makePlugin();
+      p.settings.accountTag = tag;
+      const notes = () => [...files.keys()].filter((k) => k.startsWith('Inbox/'));
+      serve({ 'GET /v1/pull': pages([text(610, 'a note about ' + label)]), 'POST /v1/cursor/reset': () => ({ json: { to_seq: 0 } }) });
+      await p.sync(false);
+      const path = notes()[0];
+      ok(`${label}: the note is written with the mark in quotes`, files.get(path).includes(`dropit_account: "${tag}"`), files.get(path));
+      // a note from before the fix: the mark was not in quotes, so it was read back as a number
+      fm.get(path).dropit_account = legacy;
+      for (let k = 0; k < 2; k++) {
+        serve({ 'GET /v1/pull': pages([text(610, 'a note about ' + label)]), 'POST /v1/cursor/reset': () => ({ json: { to_seq: 0 } }) });
+        await p.repull('all');
+      }
+      ok(`${label}: pulling again twice writes nothing more`, notes().length === 1, notes().join());
+      // with the mark as the new notes have it (text)
+      fm.get(path).dropit_account = tag;
+      serve({ 'GET /v1/pull': pages([text(610, 'a note about ' + label)]), 'POST /v1/cursor/reset': () => ({ json: { to_seq: 0 } }) });
+      await p.repull('all');
+      ok(`${label}: …and with the mark read as text`, notes().length === 1, notes().join());
+      // another account, the same number: written
+      p.settings.accountTag = 'ffffffff';
+      serve({ 'GET /v1/pull': pages([text(610, 'a note about ' + label)]), 'POST /v1/cursor/reset': () => ({ json: { to_seq: 0 } }) });
+      await p.repull('all');
+      ok(`${label}: another account's item with the same number is written`, notes().length === 2, notes().join());
+    }
+  }
+
+  console.log('── Round 1022d: the plan changes while the status shows the old one ──');
+  {
+    const { p } = await makePlugin();
+    const states = [];
+    p.statusEl = { setText: (x) => states.push(x), setAttribute() {} };
+    p.state = 'live';
+    p.realtimeUntil = Date.now() + 14 * 86_400_000;
+    p.tab.stateSetting = { setDesc() {}, descEl: null };
+    const painted = [];
+    p.tab.paintAccount = (row, m) => painted.push(m.plan);
+    const before = { plan: 'free', paid_until: null, realtime_until: p.realtimeUntil };
+    p.meCache = { m: before, at: Date.now() };
+    const until = Date.now() + 365 * 86_400_000;
+    p.api = async () => ({ plan: 'paid', paid_until: until, realtime_until: null });
+    await p.accountNow(true);
+    ok('a read that shows Paid: the trial countdown is gone and the status bar is drawn again at once', p.realtimeUntil === null && p.trialLeft() === null && states.length > 0, JSON.stringify([p.realtimeUntil, states]));
+    ok('…and the account card in the settings is painted with it', painted.join() === 'paid', JSON.stringify(painted));
+    states.length = 0; painted.length = 0;
+    await p.accountNow(true);
+    ok('the same plan read again changes nothing', states.length === 0 && painted.length === 0);
   }
 
   console.log(`\n${fail === 0 ? '✅' : '🛑'}  ${pass} passed, ${fail} failed\n`);

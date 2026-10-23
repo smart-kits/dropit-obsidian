@@ -67,7 +67,7 @@ Chinese — [README.zh-CN.md](./README.zh-CN.md) names them.
   the plan). The top of *Settings → dropit* says the same, with the plan and device count.
 - Send a test item from another device — e.g. `dropit send "hello from the CLI"` — and check that
   `Inbox/MM-DD HH.mm hello from the CLI.md` appears within a few seconds (or after clicking the
-  status bar item / running *dropit: Sync now* if real-time push isn't available).
+  status bar item / running *dropit: Sync now* if real-time delivery isn't available).
 
 ### 6 · Warn about vault sync
 

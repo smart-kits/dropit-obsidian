@@ -111,10 +111,10 @@ One glance tells you the state; click it to sync now.
 
 | Shows | Means |
 |---|---|
-| `● dropit` | Receiving in real time (hover for the days left of a trial) |
+| `● dropit` | Real-time delivery on (hover for the days left of a trial) |
 | `◌ dropit` | Connecting |
 | `↻ dropit` | Syncing |
-| `○ dropit` | No real-time on your plan right now: syncs when Obsidian opens or you come back to it |
+| `○ dropit` | No real-time delivery on your plan right now: syncs when Obsidian opens or you come back to it |
 | `○ dropit · offline` | Disconnected — reconnecting by itself |
 | `⚠ dropit` | Something failed — hover for why; it tries again by itself (after about 5 s, 15 s, then every minute — later if the server asks for that). If this vault was removed from your account, it stops trying until you pair again or click to sync |
 | `dropit · not paired` | Click to set it up |
@@ -128,9 +128,10 @@ When items arrive, one notice says how many — click it to open the last one.
   before it counts; a failed sync retries on its own.
 - **A file that won't download doesn't block the rest.** A line takes its place:
   `⚠️ report.pdf (820 KB) couldn't be downloaded: … Settings → dropit → Pull again tries once more.`
-- **Pull again** (*Settings → dropit → Receiving*, last row): everything, the last N items, or the last N days. What's already in
+- **Pull again** (*Settings → dropit → Receiving*, last row): one row with two sliders side by side and a button (on a narrow window each slider gets its own line): how many (1–50, starting at 10) and how many days back (1 up to the days Paid keeps items, starting at 1); it pulls the latest N items from the last D days, both limits at once. A free account keeps items 1 day, so its days slider stays at 1 — trying to move it shows a line under the row with what Paid would allow, and a link to the plans. A paid account can slide up to the days its items are kept. What's already in
   the vault is skipped, failed downloads are fetched again. With *A new note for each*, a note you deleted
-  comes back; in the other two modes, what you deleted stays deleted.
+  comes back; in the other two modes, what you deleted stays deleted. Pulled-back items are only written as notes; they are not handed to the AI.
+  Notes carry a short `dropit_account` mark, so a vault paired with another account later doesn't mistake that account's items for its own.
 - A newly joined device starts with what's sent after it joined; *Pull again* fetches what came before,
   for as long as your plan keeps items.
 
@@ -300,13 +301,15 @@ module.exports = async ({ app }) => {
 - **Free to use; an optional paid plan raises the limits.** Everything described here works on the free plan, within its limits:
   20 items a day, files up to 10 MB, items kept for 1 day, 2 devices, and real-time delivery for the first 14 days
   after signing up. After that, new items come in when Obsidian opens, when you come back to its window, or when you
-  click *Sync now*. The plugin tells you once when the real-time period is about to end and once when it has ended
-  (what you used it for, and what changes), and once when a paid year is about to end or has ended. Nothing else is shown.
+  click *Sync now*. The plugin tells you once when the real-time delivery period is about to end and once when it has ended
+  (what you used it for, what changes, and what keeping it costs), and once when a paid year is about to end or has ended; each comes with one link
+  to the plans page. While the period is ending or over, a small *Keep real-time* item also shows in the status bar, and the account line in the settings has a *See plans* link
+  (for a paid year that is about to end, *Renew*). Nothing else is shown.
 - **Payment.** The paid plan costs $19.90 a year (the first month is $1.90), $29.90 for one year paid once, or $49.90 once for lifetime (limited), plus local tax:
   300 items a day, files up to 100 MB, 10 devices, items kept 10 days, real-time delivery always on.
   You pay on the website ([pricing](https://dropit.smart-kits.xyz/#pricing)), never inside the plugin, and the plugin works the same
-  either way. Checkout asks for an email, where the receipt goes. Cancel anytime; any payment can be refunded within 7 days
-  ([terms](https://dropit.smart-kits.xyz/terms)).
+  either way. Checkout asks for an email, where the receipt goes. Cancel anytime; payment and refund terms are in the
+  [terms](https://dropit.smart-kits.xyz/terms).
 - **Network use.** The plugin talks to one service, the dropit server, over HTTPS and a WebSocket, to send and
   receive your items. No telemetry, no ads. Details in [Privacy](#privacy).
 - **Files.** It reads and writes only inside this vault. It doesn't scan your notes: only when an item comes back a
@@ -346,13 +349,12 @@ Ask me which vault and before creating an account, and never show or commit my t
 | Setting | What it does |
 |---|---|
 | *(top line)* | The connection state and your account: plan · devices · space · how long items are kept. *Sync now* next to it |
-| **Receiving** | *Write items as* · *Folder* · *Note*: where items land (above). Then a part called *After it arrives*, with two separate rows, either or both: *AI processing* (desktop only; with *Try it* beside the switch, and below it the agent, what to handle (with *Keep the original note* at the end of that row), the prompt, then the limits and the command, both folded) · *Run an Obsidian command*. *Pull again* is the last row |
-| **Sending** | *Send to*: one checkbox per other device that can receive. All ticked (the default) sends to all your devices, including ones you add later; tick fewer to send only to those. It is saved the moment you tick, on this computer only (in this plugin's `data.json`), and at least 1 device stays ticked. A device you removed is taken off the next time the page opens, with a notice; if every chosen device is gone the default goes back to all. The commands, the file menu and *Send N files* all follow it. Not shown while no other device can receive yet |
-| **Devices** | *Add a device* (a pairing code and its QR code) · every device on your account (*Remove* stops one right away) · a link to the install page · *Unpair* at the end, in red: it asks first, and then this computer leaves the account (the other devices are not affected; pairing again is how you come back) |
-| **Advanced** | *Server address* (only if you were given another one; the built-in is always tried last). Before you are paired this is the only other group besides the pairing rows |
+| **Receiving** | *Write items as* · *Folder* · *Note*: where items land (above). Then a part called *After it arrives*, with two separate rows, either or both: *AI processing* (desktop only; with *Try it* beside the switch, and below it a fold called *AI settings*, closed by default and showing which agent is picked: inside it, in one panel, the agent, what to handle (with *Keep the original note* at the end of that row; a custom command says it runs exactly as written, with no limits), the prompt, and the limits and the command, both folded) · *Run an Obsidian command*. *Pull again* is the last row |
+| **Devices** | *Add a device* (a pairing code and its QR code). Then one list of the devices on your account, this computer first. Once at least two other devices can receive, above the list: *This computer sends to by default*, with a checkbox on each of those devices. All ticked (the default) sends to all your devices, including ones you add later; tick fewer to send only to those. It is saved the moment you tick, on this computer only (in this plugin's `data.json`), and at least 1 device stays ticked. A device you removed is taken off the next time the page opens, with a notice; if every chosen device is gone the default goes back to all. The commands, the file menu and *Send N files* all follow it. A send-only device has no checkbox, and neither does this computer. At the end of each row: *Remove* on another device (it stops right away), *Sign out* on this computer (it asks first; then this computer leaves the account, the notes already in your vault and your settings stay, and joining again with a pairing code is how you come back). Then a link to the install page |
+| **Advanced** | *Server address* (only if you were given another one. With the default, a spare built-in address is tried last; an address you type in yourself is the only one used, and if it is down nothing is sent anywhere else). Before you are paired this is the only other group besides the pairing rows |
 | *(bottom)* | *Report a problem* (a new public issue with your versions filled in) · *Source code* |
 
-Each group folds and says how it is set while folded. Explanations live behind the small (i) next to a name: hover it, or click it where there is no hover.
+Each group has its own icon, folds with a click anywhere on its title row, and says how it is set while folded. Explanations live behind the small (i) next to a name: hover it, or click it where there is no hover.
 
 The interface follows Obsidian's language: English, or Simplified Chinese when Obsidian is set to Chinese.
 
@@ -364,7 +366,7 @@ The interface follows Obsidian's language: English, or Simplified Chinese when O
 | *Invalid token* · *This device was removed* | This vault was removed from your account | Join again with a new code |
 | *Device limit reached* | Your plan's device count is used up | Remove a device you no longer use (*Settings → dropit → Devices*) |
 | *Pairing code expired* | Codes last 5 minutes and work once | Generate a new one |
-| *Real-time trial ended* | New accounts get real-time for a while; after that it syncs when you open or come back to Obsidian | Nothing to fix — click the status bar to sync any time |
+| *Real-time delivery trial ended* | New accounts get real-time delivery for a while; after that it syncs when you open or come back to Obsidian | Nothing to fix — click the status bar to sync any time |
 | `⚠️ … couldn't be downloaded` in a note | The file didn't come down this time | *Settings → dropit → Pull again* |
 
 Anything else: the *Report a problem* link at the bottom of *Settings → dropit* (a public issue). For questions about your account you'd rather not post publicly, email [support@dropit.smart-kits.xyz](mailto:support@dropit.smart-kits.xyz).
@@ -372,7 +374,7 @@ Anything else: the *Report a problem* link at the bottom of *Settings → dropit
 ## Privacy
 
 - The sign-in is stored in this plugin's `data.json` inside your vault. **If you sync or publish your vault,
-  exclude `.obsidian/plugins/dropit/data.json`.** *Unpair* clears it.
+  exclude `.obsidian/plugins/dropit/data.json`.** *Sign out* clears it.
   A synced vault that takes `data.json` along (Obsidian Sync with community plugin settings, iCloud, Syncthing, Git)
   also makes every copy receive as the same device, so an item can be written once by each copy. Let one copy receive:
   keep `data.json` out of the sync.

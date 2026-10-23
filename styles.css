@@ -4,8 +4,11 @@
   display: flex;
   align-items: center;
   gap: var(--size-4-4);
-  padding: var(--size-4-3) 0 var(--size-4-4);
-  border-bottom: 1px solid var(--background-modifier-border);
+  margin: var(--size-4-2) 0 var(--size-4-3);
+  padding: var(--size-4-4);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l);
 }
 
 .dropit-qr svg {
@@ -26,8 +29,22 @@
 }
 
 .dropit-notice-link {
+  display: block;
   margin-top: var(--size-4-1);
   text-decoration: underline;
+  cursor: pointer;
+}
+
+.dropit-notice-note {
+  margin-top: var(--size-4-1);
+  font-size: var(--font-ui-smaller);
+  opacity: 0.7;
+}
+
+/* The small link after the account line: to the plans page */
+.dropit-settings .dropit-account-link {
+  margin-left: var(--size-4-2);
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -57,20 +74,84 @@
   user-select: text;
 }
 
-/* Settings: groups that fold, small (i) tips, a command box that is as wide as the page */
+/* Settings page. Everything hangs under .dropit-settings, which only this plugin's page carries, and uses Obsidian's own
+   variables, so it follows any theme, light or dark. */
 
-.dropit-status.setting-item {
+.dropit-settings {
+  --dropit-tint: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+  --dropit-line: var(--background-modifier-border);
+}
+
+/* Rows are flat, one under another with a thin line between, not a card each */
+.dropit-settings .setting-item {
+  margin: 0;
+  padding: var(--size-4-3) 0;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--dropit-line);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.dropit-settings .setting-item-heading {
   border-top: 0;
 }
 
+/* The top card: mark, state, account line, and the sync button */
+.dropit-settings .dropit-status.setting-item {
+  gap: var(--size-4-3);
+  margin-bottom: var(--size-4-3);
+  padding: var(--size-4-3) var(--size-4-4);
+  background: var(--background-secondary);
+  border: 1px solid var(--dropit-line);
+  border-radius: var(--radius-l);
+}
+
+.dropit-logo,
+.dropit-device-icon,
+.dropit-group-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--interactive-accent);
+}
+
+.dropit-logo {
+  width: 40px;
+  height: 40px;
+  background: var(--background-primary);
+  border: 1px solid var(--dropit-line);
+  border-radius: var(--radius-m);
+}
+
+.dropit-logo svg {
+  width: 26px;
+  height: 26px;
+}
+
+.dropit-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  background: var(--text-faint);
+  border-radius: 50%;
+}
+
+.dropit-dot.is-live { background: var(--color-green); }
+.dropit-dot.is-busy { background: var(--color-orange); }
+.dropit-dot.is-bad { background: var(--color-red); }
+
+/* A group: mark in a tinted square, name, how it is set (while folded), an arrow. The whole row is the button. */
 .dropit-group {
   margin-top: var(--size-4-3);
-  border-top: 1px solid var(--background-modifier-border);
+  border-top: 1px solid var(--dropit-line);
 }
 
 .dropit-group-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--size-4-3);
   padding: var(--size-4-3) 0;
   cursor: pointer;
@@ -81,16 +162,17 @@
   display: none;
 }
 
-.dropit-group-head::before {
-  content: "›";
-  display: inline-block;
-  width: 0.8em;
-  color: var(--text-muted);
-  transition: transform 0.12s ease;
+.dropit-group-icon {
+  width: 32px;
+  height: 32px;
+  background: var(--dropit-tint);
+  border-radius: var(--radius-m);
 }
 
-.dropit-group[open] > .dropit-group-head::before {
-  transform: rotate(90deg);
+.dropit-group-icon svg,
+.dropit-device-icon svg {
+  width: 18px;
+  height: 18px;
 }
 
 .dropit-group-title {
@@ -109,8 +191,77 @@
   white-space: nowrap;
 }
 
+.dropit-group-arrow {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+}
+
+.dropit-group-title + .dropit-group-arrow {
+  margin-left: auto;
+}
+
+.dropit-group-arrow svg {
+  width: 18px;
+  height: 18px;
+}
+
+.dropit-group[open] > .dropit-group-head .dropit-group-arrow {
+  transform: rotate(180deg);
+}
+
 .dropit-group[open] > .dropit-group-head .dropit-group-sum {
   display: none;
+}
+
+.dropit-group[open] > .dropit-group-head .dropit-group-title {
+  margin-right: auto;
+}
+
+/* Device rows: a mark in front, small outlined tags after the name */
+.dropit-device-icon {
+  width: 32px;
+  height: 32px;
+  background: var(--dropit-tint);
+  border-radius: var(--radius-m);
+}
+
+.dropit-device-icon.is-self {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+}
+
+/* Mark and name stay side by side, and the button or box at the end stays at the end, even when Obsidian stacks the rows in a narrow window */
+.dropit-settings .setting-item:has(> .dropit-device-icon),
+.dropit-settings .dropit-status.setting-item {
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--size-4-3);
+}
+
+.dropit-settings .setting-item:has(> .dropit-device-icon) > .setting-item-info,
+.dropit-settings .dropit-status.setting-item > .setting-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dropit-settings .setting-item:has(> .dropit-device-icon) > .setting-item-control,
+.dropit-settings .dropit-status.setting-item > .setting-item-control {
+  flex: none;
+  width: auto;
+}
+
+.dropit-tag {
+  margin-left: var(--size-4-2);
+  padding: 0 var(--size-4-2);
+  color: var(--text-accent);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-normal);
+  border: 1px solid var(--interactive-accent);
+  border-radius: var(--radius-l);
+  white-space: nowrap;
 }
 
 .dropit-tip {
@@ -132,6 +283,7 @@
 
 .dropit-checks {
   display: flex;
+  text-align: left;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--size-4-2);
@@ -140,13 +292,21 @@
 /* One row of boxes behind a small fixed-width label, so the rows start at the same place */
 .dropit-checks-row {
   display: flex;
+  align-items: baseline;
+  gap: var(--size-4-3);
+}
+
+.dropit-checks-items {
+  display: flex;
+  flex: 1;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--size-4-2) var(--size-4-5);
 }
 
 .dropit-checks-label {
-  min-width: 3.5em;
+  flex: none;
+  width: 4.5em;
   color: var(--text-muted);
 }
 
@@ -190,13 +350,22 @@
   margin-left: var(--size-4-1);
 }
 
+/* The prompt, the limits and the command: three folds of the same rank, a thin line above each */
 .dropit-prompt-row {
   padding: var(--size-4-2) 0;
+  border-top: 1px solid var(--dropit-line);
 }
 
 .dropit-prompt-row > summary {
   cursor: pointer;
   padding: var(--size-4-1) 0;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+}
+
+.dropit-prompt-row > .setting-item {
+  border-top: 0;
+  padding-bottom: 0;
 }
 
 .dropit-prompt {
@@ -216,17 +385,63 @@
 
 .dropit-foot a {
   color: var(--text-muted);
+  text-decoration: none;
 }
 
-/* The AI's own settings hang under its switch; the Obsidian command is a separate row of the same rank */
-.dropit-sub {
-  margin-left: var(--size-4-2);
-  padding-left: var(--size-4-3);
-  border-left: 2px solid var(--background-modifier-border);
+/* The AI's own settings: a fold under its switch, and inside, one light panel with a line down its side */
+.dropit-ai-fold {
+  margin: 0 0 var(--size-4-3);
 }
 
-.dropit-top.setting-item {
-  border-top: 1px solid var(--background-modifier-border);
+.dropit-ai-fold-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--size-4-3);
+  padding: var(--size-4-1) 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--font-ui-small);
+}
+
+.dropit-ai-fold-head::-webkit-details-marker {
+  display: none;
+}
+
+.dropit-ai-fold-head::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  border-left: 6px solid var(--text-muted);
+  border-right: 0;
+  transition: transform 0.12s ease;
+}
+
+.dropit-ai-fold[open] > .dropit-ai-fold-head::before {
+  transform: rotate(90deg);
+}
+
+.dropit-ai-fold-sum {
+  color: var(--text-muted);
+}
+
+.dropit-ai-panel {
+  margin-top: var(--size-4-2);
+  padding: 0 var(--size-4-4);
+  background: var(--background-primary-alt);
+  border-left: 3px solid color-mix(in srgb, var(--interactive-accent) 45%, transparent);
+  border-radius: 0 var(--radius-m) var(--radius-m) 0;
+}
+
+.dropit-ai-panel > :first-child {
+  border-top: 0;
+}
+
+.dropit-checks-note {
+  padding-left: calc(4.5em + var(--size-4-3));
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
 }
 
 .dropit-try {
@@ -251,6 +466,7 @@
 
 .dropit-limit > span:first-child {
   flex: 1;
+  text-align: left;
 }
 
 .dropit-unit {
@@ -280,14 +496,17 @@
   font-weight: var(--font-semibold);
 }
 
-.dropit-linkbtn {
-  color: var(--text-accent);
-  font-size: var(--font-ui-small);
-  cursor: pointer;
+.dropit-settings button.mod-warning,
+.dropit-settings button.mod-destructive {
+  color: var(--text-error) !important;
+  background: color-mix(in srgb, var(--text-error) 8%, transparent) !important;
+  border: 1px solid color-mix(in srgb, var(--text-error) 60%, transparent) !important;
+  box-shadow: none !important;
 }
 
-.dropit-linkbtn:hover {
-  color: var(--text-accent-hover);
+.dropit-settings input[type="checkbox"].dropit-check {
+  flex: none;
+  width: var(--checkbox-size, 18px);
 }
 
 .dropit-check {
@@ -302,4 +521,247 @@
 
 .dropit-warn:empty {
   display: none;
+}
+
+/* The AI row on a narrow window: the name and its line keep a readable width and the switch drops under them, instead of the text being squeezed into a sliver */
+.dropit-settings .dropit-ai.setting-item {
+  flex-wrap: wrap;
+  gap: var(--size-4-2) var(--size-4-4);
+}
+
+.dropit-settings .dropit-ai.setting-item > .setting-item-info {
+  flex: 1 1 14em;
+  min-width: min(14em, 100%);
+}
+
+.dropit-settings .dropit-ai.setting-item > .setting-item-control {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* Why joining was refused: stays under the field until the next try */
+.dropit-settings .dropit-join-note:empty {
+  display: none;
+}
+
+.dropit-settings .dropit-join-note a {
+  display: block;
+  margin-top: var(--size-4-1);
+}
+
+/* Keyboard focus: a visible ring on everything that can be Tabbed to and is not a field or a button of Obsidian's own */
+.dropit-settings .dropit-group-head:focus-visible,
+.dropit-settings .dropit-ai-fold-head:focus-visible,
+.dropit-settings .dropit-prompt-row > summary:focus-visible,
+.dropit-settings .dropit-account-link:focus-visible,
+.dropit-settings .dropit-hint a:focus-visible,
+.dropit-settings .dropit-join-note a:focus-visible,
+.dropit-settings .dropit-consent a:focus-visible,
+.dropit-settings .dropit-repull-link:focus-visible,
+.dropit-settings input[type="range"]:focus-visible,
+.dropit-settings .dropit-foot a:focus-visible,
+.dropit-settings .dropit-tip:focus-visible,
+.dropit-settings .dropit-check:has(input:focus-visible),
+.dropit-settings .dropit-check:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+
+/* A row or a box taken out of the Tab order (see tabOrder) is not drawn as focused when it is clicked */
+.dropit-settings [tabindex="-1"]:focus {
+  outline: none;
+}
+
+/* A narrow window (about 520px wide leaves the settings under 300px): nothing is squeezed to a letter wide, and nothing pushes the page sideways */
+.dropit-settings {
+  overflow-x: clip;
+}
+
+@media (max-width: 600px) {
+  /* The top card: mark and state on one line, the sync button on the next, at the right */
+  .dropit-settings .dropit-status.setting-item {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .dropit-settings .dropit-status.setting-item > .setting-item-info {
+    flex: 1 1 10em;
+    min-width: 0;
+  }
+
+  .dropit-settings .dropit-status.setting-item > .setting-item-control {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+
+  /* The Handle rows: the label on its own line, the boxes in a grid that wraps by itself */
+  .dropit-settings .dropit-checks-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--size-4-1);
+  }
+
+  .dropit-settings .dropit-checks-label {
+    width: auto;
+  }
+
+  .dropit-settings .dropit-checks,
+  .dropit-settings .dropit-checks-row {
+    width: 100%;
+  }
+
+  .dropit-settings .dropit-checks-items {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--size-4-2) var(--size-4-4);
+    min-width: 0;
+  }
+
+  /* Each box keeps the width of its own words: never stretched into a bar, never broken letter by letter */
+  .dropit-settings .dropit-check {
+    flex: 0 1 auto;
+    min-width: min-content;
+    word-break: normal;
+    overflow-wrap: normal;
+  }
+
+  /* A device row: mark and name on the first line (the name at least 8em wide), the tick and the button on the next, at the right */
+  .dropit-settings .setting-item.setting-item:has(> .dropit-device-icon) {
+    flex-wrap: wrap;
+  }
+
+  .dropit-settings .setting-item:has(> .dropit-device-icon) > .setting-item-info {
+    flex: 1 1 8em;
+    min-width: 8em;
+    overflow-wrap: anywhere;          /* only as a last resort for one very long word */
+  }
+
+  .dropit-settings .setting-item:has(> .dropit-device-icon) > .setting-item-control {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+
+  .dropit-settings .setting-item-info,
+  .dropit-settings .setting-item-control {
+    min-width: 0;
+  }
+}
+
+/* The devices list with the default folded in: a tick column and an end button column, the same on every row */
+.dropit-settings .dropit-default-head.setting-item {
+  border-top: 0;
+}
+
+.dropit-settings .dropit-default-value {
+  margin-left: var(--size-4-2);
+  color: var(--text-accent);
+  font-weight: var(--font-semibold);
+}
+
+.dropit-settings .dropit-col-head {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 calc(5.5em + var(--size-4-5)) var(--size-4-1) 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.dropit-settings .dropit-tick-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  width: 2.4em;
+  margin-right: var(--size-4-2);
+  padding-right: var(--size-4-3);
+  border-right: 1px solid var(--dropit-line);
+}
+
+.dropit-settings .dropit-end-button {
+  min-width: 5.5em;
+}
+
+@media (max-width: 600px) {
+  .dropit-settings .dropit-end-button {
+    min-width: 4.5em;
+  }
+
+  .dropit-settings .dropit-col-head {
+    padding-right: calc(4.5em + var(--size-4-5));
+  }
+}
+
+/* The line under joining and creating: what is sent, and the privacy link */
+.dropit-settings .dropit-consent {
+  padding: var(--size-4-1) 0 var(--size-4-3);
+}
+
+/* Pull again: one row — the name, the two sliders side by side (each with its own words above it), then the button.
+   The free account's days slider looks switched off but still answers; the line about it goes under the whole row */
+.dropit-settings .dropit-repull-row.setting-item {
+  flex-wrap: wrap;
+  gap: var(--size-4-2) var(--size-4-4);
+}
+
+.dropit-settings .dropit-repull-row > .setting-item-info {
+  flex: 0 0 auto;
+}
+
+.dropit-settings .dropit-repull-row > .setting-item-control {
+  flex: 1 1 18em;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--size-4-2) var(--size-4-4);
+  min-width: 0;
+}
+
+.dropit-settings .dropit-slider-cell {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: var(--size-4-1);
+  min-width: 7em;
+}
+
+.dropit-settings .dropit-slider-label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+}
+
+.dropit-settings .dropit-slider-cell input[type="range"] {
+  width: 100%;
+  margin: 0;
+}
+
+.dropit-settings .dropit-repull-row.is-locked .dropit-days-cell input[type="range"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.dropit-settings .dropit-repull-hint {
+  padding: var(--size-4-1) 0 var(--size-4-3);
+  color: var(--text-muted);
+}
+
+.dropit-settings .dropit-repull-link {
+  margin-left: var(--size-4-2);
+  color: var(--text-accent);
+}
+
+@media (max-width: 600px) {
+  /* Only when they do not fit: each slider takes a whole line, the button comes last at the right */
+  .dropit-settings .dropit-repull-row > .setting-item-control {
+    flex: 1 1 100%;
+  }
+
+  .dropit-settings .dropit-slider-cell {
+    flex: 1 1 100%;
+  }
+
+  .dropit-settings .dropit-repull-row .setting-item-control > button {
+    margin-left: auto;
+  }
 }

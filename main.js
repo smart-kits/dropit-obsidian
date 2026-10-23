@@ -1,7 +1,7 @@
 /**
  * dropit · Obsidian plugin
  *
- * Receives: real-time push over WebSocket, a catch-up sync when the window regains focus, and a
+ * Receives: real-time delivery over WebSocket, a catch-up sync when the window regains focus, and a
  * manual sync from the status bar, ribbon or command palette. **No polling timer.**
  * Sends: a selection, a note or files, from the editor and file-explorer menus.
  *
@@ -261,6 +261,8 @@ function composeInput(handler, item, fileNames) {
  */
 function sanitizeAnswer(text, max = RUN_DEFAULTS.maxAnswerChars) {
   let s = String(text ?? '').replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, '');
+  // Bound the work first: the patterns below are quadratic on a long run of unclosed brackets, and the answer is cut to `max` anyway
+  if (s.length > max * 2) s = s.slice(0, max * 2);
   // Every Markdown image goes, whatever it points at: ![alt](anything) and ![alt][ref]. A result has no use for one
   s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, (_, alt) => `[image removed${alt ? ': ' + alt : ''}]`);
   s = s.replace(/!\[([^\]]*)\]\[[^\]]*\]/g, (_, alt) => `[image removed${alt ? ': ' + alt : ''}]`);
@@ -429,6 +431,16 @@ function withDeadline(promise, ms) {
 }
 // A failed sync tries again by itself after these waits (the last one repeats)
 const SYNC_RETRY_MS = [5_000, 15_000, 60_000];
+// Items that arrive within this long of the last arrival Notice join it (one Notice with the total)
+const ARRIVAL_JOIN_MS = 5_000;
+// How much of the start of a part of a batch note is remembered, to find where it is when a part that was sent before it arrives
+const BLOCK_HEAD = 60;
+// Pull again: the latest N items no older than D days (two sliders). The days it can reach are the days the account keeps items
+const REPULL_MIN_ITEMS = 1;
+const REPULL_MAX_ITEMS = 50;
+const REPULL_DEFAULT_ITEMS = 10;
+const REPULL_DEFAULT_DAYS = 1;
+const REPULL_HINT_MS = 4_000;       // how long the line under the days slider stays for a free account
 // …except when the server says this vault's key no longer works: asking again can't fix that. Wait for a new
 // pairing or a sync by hand.
 const AUTH_LOST = new Set(['INVALID_TOKEN', 'DEVICE_REVOKED']);
@@ -439,6 +451,7 @@ const REPO = 'https://github.com/smart-kits/dropit-obsidian';
 const DEFAULTS = {
   endpoints: [DEFAULT_ENDPOINT], // tried in order; the first one that answers moves to the front
   token: '',
+  accountTag: '',                // 8 hex of a hash that tells this account from another one (notes carry it); '' until the account has been read
   device_id: '',
   previous_token: '',            // the key this vault had before it was removed or unpaired offline: sent with the next pairing
   cursor: 0,                     // the local cursor is the source of truth
@@ -502,27 +515,31 @@ const STRINGS = {
       SIGNUP_LIMITED: 'Too many accounts were created on this network today. Join an existing account with a pairing code, or try again tomorrow',
       PAIRING_LIMITED: 'Too many wrong pairing codes from this network today. Check the code on the other device and try again tomorrow',
       TURNSTILE_REQUIRED: 'Quite a few accounts were created on this network today. Create this one in the browser at dropit.smart-kits.xyz, then join it here with a pairing code',
-      QUOTA_EXCEEDED: 'Storage is full',
-      PAYLOAD_TOO_LARGE: 'Too large for your plan',
+      QUOTA_EXCEEDED: 'Your space is full',
+      PAYLOAD_TOO_LARGE: 'Too large for one item',
       GLOBAL_CIRCUIT_OPEN: 'dropit is busy right now — try again later',
       TARGET_UNAVAILABLE: 'None of the devices you chose can receive it any more',
     },
     // The sentences for the limits, with the numbers from the service's answer (never written here)
-    tooLarge: (size) => `Larger than ${size}, the most one item can be`,
+    tooLarge: (size) => `Over the ${size} limit for one item`,
+    // A text over what one item can hold (the number is the service's); a file over what Free allows, with what Paid takes
+    textTooLong: (size) => `This text is too long — one item holds up to ${size} of text`,
+    paidTakes: (n) => `Paid takes files up to ${n} MB`,
     rateHour: 'Sending too fast — try again within the hour',
     rateDay: (time) => `Today's sends are used up — back at ${time}`,
     signupLimitedAt: (time, n) => `This network has made its ${n} accounts for today. Join an existing account with a pairing code, or try again after ${time}`,
     rateDayUploads: (time) => `Today's file uploads are used up — back at ${time}`,
+    ratePairings: (time) => `This account has added as many devices as it can today — try again after ${time}`,
     rateDayDownloads: (time) => `Today's downloads are used up — back at ${time}`,
     quotaItems: 'Too many items waiting — wait for old ones to expire',
-    quotaBytes: 'Storage is full — wait for old items to expire',
+    quotaBytes: 'Your space is full — wait for old items to expire',
     quotaItemsIn: (span) => `Too many items waiting — the oldest expires in ${span} and frees up room`,
-    quotaBytesIn: (span) => `Storage is full — the oldest item expires in ${span} and frees up room`,
+    quotaBytesIn: (span) => `Your space is full — the oldest item expires in ${span} and frees up room`,
     span: (sec) => (sec < 3600 ? 'under an hour' : Math.ceil(sec / 3600) < 48 ? `about ${Math.ceil(sec / 3600)} hour${Math.ceil(sec / 3600) === 1 ? '' : 's'}` : `about ${Math.ceil(sec / 86400)} days`),
     // The way past a limit the paid plan lifts (the service gives the link to free accounts only)
     upgradeFor: (why) => ({
       per_day: 'Keep sending with Paid', queue: 'Let more items wait with Paid', space: 'Get more space with Paid', file_size: 'Send it with Paid',
-      devices: 'Add more devices with Paid', realtime: 'Keep real-time delivery with Paid', uploads: 'Keep sending files with Paid',
+      devices: 'Add more devices with Paid', realtime: 'Keep real-time delivery', uploads: 'Keep sending files with Paid',
       downloads: 'Keep downloading with Paid', kept: 'Keep items longer with Paid',
     }[why] || 'See Paid'),
     httpFailed: (status) => `Request failed: HTTP ${status}`,
@@ -535,6 +552,7 @@ const STRINGS = {
     menuSend: 'Send to dropit',
     menuSendFiles: (n) => `Send ${n} files to dropit`,
     received: (n) => `dropit: received ${n} item${n === 1 ? '' : 's'}`,
+    pulledBack: (n) => `dropit: pulled back ${n} item${n === 1 ? '' : 's'}`,
     openNote: (name) => `Open ${name}`,
     nothingNew: 'dropit: nothing new',
     sent: (n) => `dropit: sent${n > 1 ? ` ${n} items` : ''}`,
@@ -554,7 +572,7 @@ const STRINGS = {
     },
     statusTip: {
       unpaired: 'Click to pair',
-      live: 'Receiving in real time · click to sync now',
+      live: 'Real-time delivery on · click to sync now',
       manual: 'Syncs when Obsidian opens or you come back to it · click to sync now',
       offline: 'Disconnected, reconnecting · click to sync now',
       connecting: 'Connecting… · click to sync now',
@@ -564,50 +582,65 @@ const STRINGS = {
     unnamedFile: 'untitled file',
     missing: (name, kb, msg) => `⚠️ ${name} (${kb} KB) couldn't be downloaded: ${msg}. Settings → dropit → Pull again tries once more.`,
     preparing: 'dropit: preparing the account… this can take a few seconds',
-    // The trial's length (n) is the service's to say: without it these sentences carry no number. `enjoyed` is the
-    // "what you had" sentence, `paid` the one about the paid plan (only when there is a way to it); both may be ''.
-    noRealtime: (n, enjoyed = '', paid = '') => `dropit: real-time push isn't in your plan${n ? ` (new accounts get it for ${n} days)` : ''}. `
-      + `${enjoyed}New items now arrive when Obsidian opens, when you come back to it, or when you sync by hand.${paid}`,
-    trialOver: (n, enjoyed = '', paid = '') => `dropit: the ${n ? `${n}-day ` : ''}real-time trial has ended. `
-      + `${enjoyed}New items now arrive when Obsidian opens, when you come back to it, or when you sync by hand.${paid}`,
-    trialEnding: (n, enjoyed = '', paid = '') => `dropit: real-time push ends in less than a day${n ? ` (new accounts get it for ${n} days)` : ''}. `
-      + `${enjoyed}After that, new items arrive when Obsidian opens, when you come back to it, or when you sync by hand.${paid}`,
-    trialSoon: (left, n, enjoyed = '', paid = '') => `dropit: real-time push has ${left}${n ? ` (new accounts get it for ${n} days)` : ''}. `
-      + `${enjoyed}After that, new items arrive when Obsidian opens, when you come back to it, or when you sync by hand.${paid}`,
-    // What the account has had so far; each half is left out when it has nothing to say
-    enjoyed: ({ days, items, devices }) => {
-      const parts = [items > 0 ? `${items} item${items === 1 ? '' : 's'} sent` : null, devices > 1 ? `${devices} devices receiving` : null].filter(Boolean);
-      return `You've had real-time push${days ? ` for ${days} day${days === 1 ? '' : 's'}` : ''}${parts.length ? `: ${parts.join(', ')}` : ''}. `;
+    // The real-time delivery moments (T1 days left, T2 under a day, T3 ended, N not in the plan). `v` is what the service said
+    // about the account and the plans (see momentFacts): a number it didn't give is left out, never written here.
+    // `left` is the countdown ("3 days left"). With more than a little to show (v.rich) it says what the account did and what Paid adds.
+    moment: (kind, v, left) => {
+      const head = { T1: `Real-time delivery has ${left}.`, T2: 'Real-time delivery ends in less than a day.', T3: 'The real-time delivery trial has ended.',
+        N: "Real-time delivery isn't part of your plan." }[kind];
+      const items = v.items > 0, devs = v.devices > 1;
+      let usage = '';
+      if (v.rich && items) usage = `${v.days ? `In these ${v.days} days you sent` : 'This account has sent'} ${v.items} item${v.items === 1 ? '' : 's'}${devs ? `, and your ${v.devices} devices got them right away` : ''}.`;
+      else if (v.rich && devs) usage = `Your ${v.devices} devices have been getting items right away.`;
+      const lead = kind === 'T1' || kind === 'T2' ? 'After that, new' : kind === 'T3' ? 'From now on, new' : 'New';
+      const after = `${lead} items reach Obsidian when you open it, come back to it, or sync by hand${v.kept ? `, and items are kept ${v.kept} day${v.kept === 1 ? '' : 's'}` : ''}.`;
+      const perks = v.rich && v.linked && v.perks ? STRINGS.en.limitsLine(v.perks, true) : '';
+      return `dropit: ${[head, usage, after, perks ? `Keep real-time delivery and you also get: ${perks}.` : ''].filter(Boolean).join(' ')}`;
     },
-    paidKeeps: ' Paid keeps real-time push on.',
-    renew: 'Renew Paid',
-    paidEnding: (date) => `dropit: Paid runs until ${date}. After that the free limits apply and real-time push stops. You can renew on the dropit website.`,
-    paidEnded: (items, date) => `dropit: Paid has ended.${items > 0 ? ` This account has sent ${items} item${items === 1 ? '' : 's'} in total.` : ''} `
-      + `The free limits apply now and real-time push stops.${date ? ` Items already sent keep their Paid retention, and until ${date} space and backlog still count as Paid.` : ''}`,
+    // What a plan's limits come to, from the plans (a limit the service didn't give is left out)
+    limitsLine: (l, withDays) => [l.perDay ? `${l.perDay} items a day` : null, l.fileMB ? `${l.fileMB} MB per file` : null, l.devices ? `up to ${l.devices} devices` : null,
+      withDays && l.days ? `items kept ${l.days} day${l.days === 1 ? '' : 's'}` : null].filter(Boolean).join(', '),
+    // The one button of a moment: what keeping it costs (the first month while it is on offer), and the small print under it
+    keepLabel: (p) => `Keep real-time delivery${p.trial ? ` · first month ${p.trial}` : p.year ? ` · ${p.year} a year` : ''}`,
+    keepNote: (p) => (p.year ? (p.trial ? `Then ${p.year} a year, cancel anytime` : 'Cancel anytime') : ''),
+    seePlans: 'See plans',
+    renewShort: 'Renew',
+    upShort: 'Keep real-time',
+    plansUnavailable: 'dropit: the plans page isn\'t available right now',
+    renew: (p) => `Renew a year${p?.once ? ` · ${p.once}` : ''}`,
+    getAgain: 'Get Paid again',
+    linkFailed: (msg) => `dropit: couldn't open the plans page (${msg})`,
+    linkTooMany: 'dropit: too many tries today — try again tomorrow',
+    paidEnding: (date, line) => `dropit: Paid ends on ${date}. ${line ? `To keep ${line}, renew a year before then.` : 'To keep it going, renew a year before then.'}`,
+    paidEnded: (date, line) => `dropit: Paid has ended; the account is back on Free${line ? ` (${line})` : ''}.${date ? ` What you already sent stays as it was until ${date}.` : ''}`,
     paidUntil: (date) => `Paid until ${date}`,
-    trialFull: 'dropit: today\'s real-time spots are full — it comes back by itself tomorrow. '
+    trialFull: 'dropit: today\'s real-time delivery spots are full — it comes back by itself tomorrow. '
       + 'Until then, new items arrive when Obsidian opens, when you come back to it, or when you sync by hand.',
     daysLeft: (n) => (n < 1 ? 'less than a day left' : `${n} day${n === 1 ? '' : 's'} left`),
-    tipLiveTrial: (left) => `Receiving in real time (trial: ${left}) · click to sync now`,
-    tipTrialOver: 'Real-time trial ended · syncs when Obsidian opens or you come back to it · click to sync now',
-    tipTrialFull: 'Today\'s real-time spots are full, back tomorrow · click to sync now',
-    tooMany: (n) => `dropit: real-time push is paused — this account already has ${n} live connections (Obsidian on several `
+    tipLiveTrial: (left) => `Real-time delivery on (trial: ${left}) · click to sync now`,
+    tipTrialOver: 'Real-time delivery trial ended · syncs when Obsidian opens or you come back to it · click to sync now',
+    tipTrialFull: 'Today\'s real-time delivery spots are full, back tomorrow · click to sync now',
+    tooMany: (n) => `dropit: real-time delivery is paused — this account already has ${n} live connections (Obsidian on several `
       + 'devices, or dropit watch). It tries again by itself in about 15 minutes; meanwhile new items arrive when you come back to Obsidian or sync.',
-    tipTooMany: 'Real-time paused: this account has too many live connections · tries again in about 15 minutes · click to sync now',
+    tipTooMany: 'Real-time delivery paused: this account has too many live connections · tries again in about 15 minutes · click to sync now',
     // settings · not paired
     setupHeading: 'Join with a pairing code',
     haveCode: 'Pairing code',
     haveCodeDesc: 'Generate it in a dropit client you already use — 6 characters, valid for 5 minutes',
     join: 'Join',
+    // Said before either button is pressed (the same words the other clients use), with the privacy page
+    consentJoin: 'Joining sends this vault\'s device name and a fingerprint hash, used only to manage your device slots. What you send is kept for a short while so your other devices can receive it.',
+    consentCreate: 'Creating an account sends this vault\'s device name and a fingerprint hash, used only to manage your device slots. What you send is kept for a short while so your other devices can receive it.',
+    privacyLink: 'Privacy',
     create: 'First time using dropit?',
     createDesc: 'Create a new account on this device, then add your phone and browsers from here',
     createButton: 'Create a new account',
     // settings · paired
-    stateLive: '● Receiving in real time',
-    stateLiveTrial: (left) => `● Receiving in real time · trial: ${left}`,
+    stateLive: '● Real-time delivery on',
+    stateLiveTrial: (left) => `● Real-time delivery on · trial: ${left}`,
     stateManual: '○ Syncs when you open or come back to Obsidian',
-    stateTrialOver: '○ Real-time trial ended · syncs when you open or come back',
-    stateTrialFull: '○ Real-time spots are full today · back tomorrow',
+    stateTrialOver: '○ Real-time delivery trial ended · syncs when you open or come back',
+    stateTrialFull: '○ Real-time delivery spots are full today · back tomorrow',
     stateOffline: '○ Disconnected — reconnecting',
     stateConnecting: '◌ Connecting…',
     stateError: (msg) => `⚠ ${msg}`,
@@ -635,10 +668,14 @@ const STRINGS = {
     hookNotRun: (id) => `Command didn't run (its conditions weren't met): ${id}`,
     repull: 'Pull again',
     repullDesc: (seq) => `Received up to #${seq}. Items already in the vault are skipped; downloads that failed are tried again.`,
-    repullAll: 'Everything',
-    repullLast: 'The last N items',
-    repullDays: 'The last N days',
+    repullDesc2: 'Pulls the latest N items from the last D days (both limits apply; at most 50 items). The default is the latest 10 from the last day.',
+    repullCount: (n) => `Latest ${n} item${n === 1 ? '' : 's'}`,
+    repullWithin: (d) => `Last ${d} day${d === 1 ? '' : 's'}`,
+    repullHint: (kept, n) => `Free keeps items for ${kept} day${kept === 1 ? '' : 's'}. With Paid, anything you missed can come back for ${n ? `up to ${n} days` : 'longer'}.`,
+    repullSeePlans: 'See plans',
     repullGo: 'Pull',
+    repullCountLabel: 'How many items to pull',
+    repullDaysLabel: 'How many days back',
     repullNumber: 'Enter a positive number',
     addDevice: 'Add a device',
     generate: 'Generate a pairing code',
@@ -648,7 +685,8 @@ const STRINGS = {
     slotFull: (limit, name) => `All ${limit} device slots are in use — the new device will replace “${name}” when it joins.`,
     slotChange: 'Replace a different one',
     slotNone: 'All device slots are in use. Remove one in the device list below first.',
-    slotUpgrade: 'Or upgrade to Paid',
+    slotUpgrade: 'Or add more devices with Paid',
+    slotUpgradeN: (n) => `Or go Paid — up to ${n} devices`,
     deviceJoined: 'dropit: a new device joined',
     thisDevice: 'this device',
     lastSeen: (when) => `last seen ${when}`,
@@ -665,26 +703,23 @@ const STRINGS = {
     advanced: 'Advanced',
     serverAddress: 'Server address',
     serverAddressDesc: 'Rarely needs changing. If it stops answering, the built-in address is tried next.',
-    unpair: 'Unpair',
-    unpairDesc: 'This computer leaves the account; your other devices are not affected.',
-    unpairAsk: 'This computer leaves the account; your other devices are not affected. To use dropit here again, you will have to pair again.',
-    unpairTitle: 'Unpair?',
+    // What signing out really does here (see unpair()): the key and the place reached are dropped, the notes already written and the settings stay
+    signOut: 'Sign out',
+    signOutAsk: 'After signing out, this device stops sending and receiving. The notes already in your vault and your settings stay; join again with a pairing code to come back (Pull again fetches what was sent while you were away). Your default devices are cleared.',
+    signOutTitle: 'Sign out of this device?',
     replacedOld: (name) => `dropit: took the place of this vault's earlier "${name}" — it no longer uses a device slot`,
     revokedReplaced: 'dropit was paired again for this vault, so this copy was signed out — pair again to use it',
-    unpairButton: 'Unpair',
-    unpairYes: 'Unpair',
     ago: { now: 'just now', min: (n) => `${n} min ago`, hour: (n) => `${n} h ago`, day: (n) => `${n} d ago` },
     set: {
       receiving: 'Receiving',
       after: 'After it arrives',
-      delivery: 'Sending',
-      defaultTo: 'Send to',
+      defaultHead: 'This computer sends to by default:',
+      defaultCol: 'Default',
       defaultToDesc: 'Saved as you tick, and only on this computer. All ticked = send to all devices, and devices you add later are included.',
-      selectAll: 'Select all',
+      defaultIs: (v) => `Default: ${v}`,
       allDevices: 'All',
-      deviceN: (n) => `${n} devices`,
-      noOthers: 'No other device can receive yet. Add one under Devices, and you can pick here where this vault sends.',
-      keepOne: 'Keep at least 1 device. To send to all, select all.',
+      deviceN: (n) => `${n} device${n === 1 ? '' : 's'}`,
+      keepOne: 'Keep at least 1 device. To send to all, tick them all.',
       devices: 'Devices',
       advanced: 'Advanced',
       writeAs: 'Write items as',
@@ -709,6 +744,8 @@ const STRINGS = {
       prompt: 'Prompt',
       promptTip: '{{kind}} is the only variable: other {{…}} are dropped, because titles, file names and text are written by whoever sent them.',
       keepOriginal: 'Keep the original note',
+      customNoLimits: 'A custom command runs exactly as you wrote it; dropit adds no limits.',
+      aiSettings: 'AI settings',
       fullAccess: 'Don’t limit the agent',
       fullAccessTip: 'Advanced. Off (default): a text gets no tools, a link can open its one site, a file can read its own copy. On: the agent may use everything your own Claude Code allows — going online, reading and writing files, running commands, skills, MCP servers — and dropit adds no limit. Read the warning first.',
       keepOriginalTip: 'On: the note stays as received and the result goes into a new note beside it. Off: a received text or link becomes one note — what arrived (quoted), then the result. A file is always kept, with the result beside it.',
@@ -849,24 +886,27 @@ const STRINGS = {
       PAIRING_LIMITED: '这个网络今天输错配对码的次数太多了。核对一下另一台设备上的码，明天再试',
       TURNSTILE_REQUIRED: '这个网络今天建的账号较多。请在浏览器里打开 dropit.smart-kits.xyz 建号，再在这里用配对码加入',
       QUOTA_EXCEEDED: '空间已满',
-      PAYLOAD_TOO_LARGE: '超过了当前套餐的大小上限',
+      PAYLOAD_TOO_LARGE: '内容太大，超过了单条上限',
       GLOBAL_CIRCUIT_OPEN: 'dropit 现在比较忙，稍后再试',
       TARGET_UNAVAILABLE: '你选的设备都已经不能接收了',
     },
     tooLarge: (size) => `超过了单条上限 ${size}`,
+    textTooLong: (size) => `这段文字太长了，单条文字最多 ${size}`,
+    paidTakes: (n) => `升级后单个文件最大 ${n} MB`,
     rateHour: '投得太快了，这一小时内再试',
     rateDay: (time) => `今天的投递次数用完了，${time} 恢复`,
     signupLimitedAt: (time, n) => `这个网络今天已经建了 ${n} 个账号，到上限了。可以用配对码加入已有账号，或者 ${time} 以后再试`,
     rateDayUploads: (time) => `今天的文件上传次数用完了，${time} 恢复`,
+    ratePairings: (time) => `这个账号今天加入的设备已经够多了，${time} 以后再试`,
     rateDayDownloads: (time) => `今天的下载次数用完了，${time} 恢复`,
-    quotaItems: '积压的内容太多了，等旧内容过期',
+    quotaItems: '排队等收的内容太多了，等旧内容过期',
     quotaBytes: '空间已满，等旧内容过期',
-    quotaItemsIn: (span) => `积压的内容太多了，最早的一条${span}后到期，到时自动腾出位置`,
+    quotaItemsIn: (span) => `排队等收的内容太多了，最早的一条${span}后到期，到时自动腾出位置`,
     quotaBytesIn: (span) => `空间已满，最早的一条${span}后到期，到时自动腾出位置`,
     span: (sec) => (sec < 3600 ? '不到 1 小时' : Math.ceil(sec / 3600) < 48 ? `约 ${Math.ceil(sec / 3600)} 小时` : `约 ${Math.ceil(sec / 86400)} 天`),
     upgradeFor: (why) => ({
-      per_day: '升级接着发', queue: '升级后可以积压更多', space: '升级获得更多空间', file_size: '升级后发送',
-      devices: '升级后放得下更多设备', realtime: '升级后实时一直有', uploads: '升级接着传文件',
+      per_day: '升级接着发', queue: '升级后能排更多条', space: '升级获得更多空间', file_size: '升级后发送',
+      devices: '升级后放得下更多设备', realtime: '保留实时送达', uploads: '升级接着传文件',
       downloads: '升级接着下载', kept: '升级后内容留得更久',
     }[why] || '看看付费版'),
     httpFailed: (status) => `请求失败 HTTP ${status}`,
@@ -879,6 +919,7 @@ const STRINGS = {
     menuSend: '发到 dropit',
     menuSendFiles: (n) => `把这 ${n} 个文件发到 dropit`,
     received: (n) => `dropit：收到 ${n} 条`,
+    pulledBack: (n) => `dropit：拉回了 ${n} 条`,
     openNote: (name) => `打开 ${name}`,
     nothingNew: 'dropit：没有新内容',
     sent: (n) => `dropit：已发送${n > 1 ? ` ${n} 条` : ''}`,
@@ -898,7 +939,7 @@ const STRINGS = {
     },
     statusTip: {
       unpaired: '点这里配对',
-      live: '实时接收中 · 点击立即同步',
+      live: '实时送达已开启 · 点击立即同步',
       manual: '打开或回到 Obsidian 时同步 · 点击立即同步',
       offline: '已断开，正在重连 · 点击立即同步',
       connecting: '正在连接… · 点击立即同步',
@@ -908,40 +949,55 @@ const STRINGS = {
     unnamedFile: '未命名文件',
     missing: (name, kb, msg) => `⚠️ ${name}（${kb} KB）没能下载下来：${msg}。设置 → dropit → 重新拉取 会再试一次。`,
     preparing: 'dropit：正在准备账号…可能要几秒钟',
-    noRealtime: (n, enjoyed = '', paid = '') => `dropit：当前套餐不含实时推送${n ? `（新账号有 ${n} 天体验期）` : ''}。${enjoyed}新内容改为在打开 Obsidian、回到窗口或手动同步时拉取。${paid}`,
-    trialOver: (n, enjoyed = '', paid = '') => `dropit：${n ? `${n} 天的` : ''}实时推送体验已结束。${enjoyed}新内容改为在打开 Obsidian、回到窗口或手动同步时拉取。${paid}`,
-    trialEnding: (n, enjoyed = '', paid = '') => `dropit：实时推送体验不到 1 天就结束了${n ? `（新账号有 ${n} 天）` : ''}。${enjoyed}之后新内容在打开 Obsidian、回到窗口或手动同步时拉取。${paid}`,
-    trialSoon: (left, n, enjoyed = '', paid = '') => `dropit：实时推送体验${left}${n ? `（新账号有 ${n} 天）` : ''}。${enjoyed}之后新内容在打开 Obsidian、回到窗口或手动同步时拉取。${paid}`,
-    enjoyed: ({ days, items, devices }) => {
-      const parts = [items > 0 ? `投了 ${items} 条` : null, devices > 1 ? `${devices} 台设备在收` : null].filter(Boolean);
-      return `你已经享受了${days ? ` ${days} 天的` : ''}实时推送${parts.length ? `：${parts.join('，')}` : ''}。`;
+    moment: (kind, v, left) => {
+      const head = { T1: `实时送达体验${left}。`, T2: '实时送达体验不到 1 天就结束了。', T3: '实时送达的体验结束了。', N: '当前套餐不含实时送达。' }[kind];
+      const items = v.items > 0, devs = v.devices > 1;
+      let usage = '';
+      if (v.rich && items) usage = `${v.days ? `这 ${v.days} 天里，你投出了` : '这个账号已经投出了'} ${v.items} 条内容${devs ? `，${v.devices} 台设备一直是立刻收到` : ''}。`;
+      else if (v.rich && devs) usage = `你的 ${v.devices} 台设备一直是立刻收到。`;
+      const lead = kind === 'T1' || kind === 'T2' ? '之后，新内容' : kind === 'T3' ? '现在起，新内容' : '新内容';
+      const after = `${lead}要等你打开 Obsidian、回到窗口或手动同步才会收到${v.kept ? `，内容保留 ${v.kept} 天` : ''}。`;
+      const perks = v.rich && v.linked && v.perks ? STRINGS.zh.limitsLine(v.perks, true) : '';
+      return `dropit：${[head, usage, after, perks ? `保留实时送达，还能：${perks}。` : ''].filter(Boolean).join('')}`;
     },
-    paidKeeps: '付费版一直有实时推送。',
-    renew: '续费',
-    paidEnding: (date) => `dropit：付费版有效到 ${date}。到期后回到免费版的额度，实时推送停止。可以在 dropit 网站上续费。`,
-    paidEnded: (items, date) => `dropit：付费版已到期。${items > 0 ? `这个账号累计投了 ${items} 条。` : ''}`
-      + `现在起按免费版的额度，实时推送停止。${date ? `已经投的内容照付费版保留；到 ${date} 前空间和积压仍按付费版算。` : ''}`,
+    limitsLine: (l, withDays) => [l.perDay ? `每天 ${l.perDay} 条` : null, l.fileMB ? `单个文件 ${l.fileMB} MB` : null, l.devices ? `最多 ${l.devices} 台设备` : null,
+      withDays && l.days ? `内容保留 ${l.days} 天` : null].filter(Boolean).join('、'),
+    keepLabel: (p) => `保留实时送达${p.trial ? ` · 首月 ${p.trial}` : p.year ? ` · ${p.year}/年` : ''}`,
+    keepNote: (p) => (p.year ? (p.trial ? `之后 ${p.year}/年，可随时取消` : '可随时取消') : ''),
+    seePlans: '看看套餐',
+    renewShort: '续费',
+    upShort: '保留实时送达',
+    plansUnavailable: 'dropit：套餐页暂时打不开',
+    renew: (p) => `续一年${p?.once ? ` · ${p.once}` : ''}`,
+    getAgain: '再开通',
+    linkFailed: (msg) => `dropit：没能打开套餐页（${msg}）`,
+    linkTooMany: 'dropit：今天点得太多了，明天再试',
+    paidEnding: (date, line) => `dropit：付费版到 ${date} 结束。${line ? `想继续保持${line}，` : '想继续用付费版，'}到期前续一年就行。`,
+    paidEnded: (date, line) => `dropit：付费版已结束，账号回到免费版${line ? `（${line}）` : ''}。${date ? `之前投的内容仍按付费版保留到 ${date}。` : ''}`,
     paidUntil: (date) => `付费版有效到 ${date}`,
-    trialFull: 'dropit：今天的实时名额满了，明天自动恢复。在那之前，新内容在打开 Obsidian、回到窗口或手动同步时拉取。',
+    trialFull: 'dropit：今天的实时送达名额满了，明天自动恢复。在那之前，新内容在打开 Obsidian、回到窗口或手动同步时收到。',
     daysLeft: (n) => (n < 1 ? '不到 1 天' : `还剩 ${n} 天`),
-    tipLiveTrial: (left) => `实时接收中（体验${left}）· 点击立即同步`,
-    tipTrialOver: '实时推送体验已结束 · 打开或回到 Obsidian 时同步 · 点击立即同步',
-    tipTrialFull: '今天的实时名额满了，明天自动恢复 · 点击立即同步',
-    tooMany: (n) => `dropit：实时推送暂停 —— 这个账号已经有 ${n} 条实时连接（多台设备上的 Obsidian，或 dropit watch）。`
-      + '大约 15 分钟后自己再试；在那之前，新内容在回到 Obsidian 或手动同步时拉取。',
-    tipTooMany: '实时推送暂停：这个账号的实时连接太多了 · 大约 15 分钟后再试 · 点击立即同步',
+    tipLiveTrial: (left) => `实时送达已开启（体验${left}）· 点击立即同步`,
+    tipTrialOver: '实时送达体验已结束 · 打开或回到 Obsidian 时同步 · 点击立即同步',
+    tipTrialFull: '今天的实时送达名额满了，明天自动恢复 · 点击立即同步',
+    tooMany: (n) => `dropit：实时送达暂停 —— 这个账号已经有 ${n} 条实时连接（多台设备上的 Obsidian，或 dropit watch）。`
+      + '大约 15 分钟后自己再试；在那之前，新内容在回到 Obsidian 或手动同步时收到。',
+    tipTooMany: '实时送达暂停：这个账号的实时连接太多了 · 大约 15 分钟后再试 · 点击立即同步',
     setupHeading: '用配对码加入',
     haveCode: '配对码',
     haveCodeDesc: '在你已经在用的 dropit 客户端里生成，6 位，5 分钟内有效',
     join: '加入',
+    consentJoin: '加入时会发送这个 vault 的设备名称和一个设备指纹摘要，只用来管理你的设备名额。你投递的内容会暂存一段时间，供你的其他设备接收。',
+    consentCreate: '创建账号时会发送这个 vault 的设备名称和一个设备指纹摘要，只用来管理你的设备名额。你投递的内容会暂存一段时间，供你的其他设备接收。',
+    privacyLink: '隐私说明',
     create: '第一次用 dropit？',
     createDesc: '在这台设备上创建新账号，之后在这里把手机和浏览器加进来',
     createButton: '创建新账号',
-    stateLive: '● 实时接收中',
-    stateLiveTrial: (left) => `● 实时接收中 · 体验${left}`,
+    stateLive: '● 实时送达已开启',
+    stateLiveTrial: (left) => `● 实时送达已开启 · 体验${left}`,
     stateManual: '○ 打开或回到 Obsidian 时同步',
-    stateTrialOver: '○ 实时推送体验已结束 · 打开或回到时同步',
-    stateTrialFull: '○ 今天的实时名额满了 · 明天自动恢复',
+    stateTrialOver: '○ 实时送达体验已结束 · 打开或回到时同步',
+    stateTrialFull: '○ 今天的实时送达名额满了 · 明天自动恢复',
     stateOffline: '○ 已断开，正在重连',
     stateConnecting: '◌ 正在连接…',
     stateError: (msg) => `⚠ ${msg}`,
@@ -969,10 +1025,14 @@ const STRINGS = {
     hookNotRun: (id) => `命令没有运行（它的前提条件不满足）：${id}`,
     repull: '重新拉取',
     repullDesc: (seq) => `已收到 #${seq}。vault 里已有的不会重复写；之前下载失败的会重新下载。`,
-    repullAll: '全部',
-    repullLast: '最近 N 条',
-    repullDays: '最近 N 天',
+    repullDesc2: '拉回最近 D 天里最新的 N 条（两个条件同时生效，最多 50 条）。默认是最近 1 天里最新的 10 条。',
+    repullCount: (n) => `最新 ${n} 条`,
+    repullWithin: (d) => `最近 ${d} 天`,
+    repullHint: (kept, n) => `免费版内容保留 ${kept} 天。升级付费版，错过的内容最长可以找回${n ? ` ${n} 天` : '更久'}。`,
+    repullSeePlans: '了解付费版',
     repullGo: '拉取',
+    repullCountLabel: '拉回多少条',
+    repullDaysLabel: '往回多少天',
     repullNumber: '请填一个正整数',
     addDevice: '添加设备',
     generate: '生成配对码',
@@ -982,7 +1042,8 @@ const STRINGS = {
     slotFull: (limit, name) => `${limit} 台设备的名额已满，新设备加入时替换「${name}」。`,
     slotChange: '换一台',
     slotNone: '名额已满，先在下面的设备列表里移除一台。',
-    slotUpgrade: '或升级到付费版',
+    slotUpgrade: '或升级后放得下更多设备',
+    slotUpgradeN: (n) => `或升级后最多 ${n} 台设备`,
     deviceJoined: 'dropit：新设备已加入',
     thisDevice: '本机',
     lastSeen: (when) => `${when}在线`,
@@ -999,26 +1060,22 @@ const STRINGS = {
     advanced: '高级',
     serverAddress: '服务地址',
     serverAddressDesc: '一般不用改。这个地址连不上时，会自动改用内置地址。',
-    unpair: '解除配对',
-    unpairDesc: '这台电脑退出账号，其他设备不受影响。',
-    unpairAsk: '这台电脑会退出账号，其他设备不受影响。之后要再用就得重新配对。',
-    unpairTitle: '解除配对？',
+    signOut: '退出',
+    signOutAsk: '退出后，这台设备不再收发。vault 里已写入的笔记和插件设置会保留；用配对码重新加入即可回来（离开期间投的内容可用「重新拉取」取回）。默认投给的选择会被清空。',
+    signOutTitle: '退出这台设备？',
     replacedOld: (name) => `dropit：替换了这个仓库之前的「${name}」，不再多占一台设备的名额`,
     revokedReplaced: '这个仓库重新配对过 dropit，这一份已退出 —— 要用请重新配对',
-    unpairButton: '解除',
-    unpairYes: '解除配对',
     ago: { now: '刚刚', min: (n) => `${n} 分钟前`, hour: (n) => `${n} 小时前`, day: (n) => `${n} 天前` },
     set: {
       receiving: '接收',
       after: '收到之后',
-      delivery: '投递',
-      defaultTo: '默认投给',
+      defaultHead: '这台电脑默认投给：',
+      defaultCol: '默认投给',
       defaultToDesc: '勾选即保存，只存在这台电脑上。全勾上 = 默认投给全部，新加入的设备会自动加入。',
-      selectAll: '全选',
+      defaultIs: (v) => `默认投给${v}`,
       allDevices: '全部',
       deviceN: (n) => `${n} 台`,
-      noOthers: '还没有其他能接收的设备。在「设备」里加一台，这里就能选这个仓库投给谁。',
-      keepOne: '至少保留 1 台；想投给全部，请全选',
+      keepOne: '至少保留 1 台；想投给全部，请全部勾上',
       devices: '设备',
       advanced: '高级',
       writeAs: '笔记写成',
@@ -1043,6 +1100,8 @@ const STRINGS = {
       prompt: '提示词',
       promptTip: '只有 {{kind}} 这一个变量有意义：其它 {{…}} 会被丢弃，因为标题、文件名和正文都是发送者写的。',
       keepOriginal: '保留原笔记',
+      customNoLimits: '自定义命令按你写的原样运行，dropit 不加任何限制。',
+      aiSettings: 'AI 设置',
       fullAccess: '不限制 agent',
       fullAccessTip: '高级选项。关（默认）：文字没有工具，链接只能打开它指向的网站，文件只能读自己的副本。开：agent 可以使用你自己的 Claude Code 允许的一切——联网、读写文件、运行命令、技能、MCP 服务——dropit 不加任何限制。先读警告。',
       keepOriginalTip: '开：收到的笔记保持原样，结果写成旁边的新笔记。关：收到的文字或链接变成一条笔记——先引用收到的内容，再写结果。文件始终保留，结果写在旁边。',
@@ -1214,6 +1273,13 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass('mod-clickable');
     this.registerDomEvent(this.statusEl, 'click', () => (this.settings.token ? this.sync(true) : this.openSettings()));
+    // A second, quiet item for the few days the trial is ending or has ended: one click to the plans page (hidden otherwise)
+    this.upEl = this.addStatusBarItem();
+    this.upEl.addClass('mod-clickable');
+    this.upEl.setText(t.upShort);
+    this.upEl.setAttribute('aria-label', t.seePlans);
+    this.upEl.toggle?.(false);
+    this.registerDomEvent(this.upEl, 'click', () => this.openPlans({ why: 'realtime' }));
 
     this.addCommand({ id: 'sync', name: t.cmdSync, callback: () => this.sync(true) });
     this.addCommand({
@@ -1384,7 +1450,9 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   async syncOnce(verbose, { since = 0, why } = {}) {
     this.setStatus('syncing');
-    const ctx = { written: [], auto: [] };
+    // Pulling again brings back what was already received once: it is written, never handed to the AI rules
+    const ctx = { written: [], auto: [], noAuto: why === 'repull' };
+    this.repulling = why === 'repull';
     try {
       for (let hasMore = true; hasMore; ) {
         const page = await this.api('GET', `/v1/pull?after=${this.settings.cursor}&limit=${PAGE}${since ? `&since=${since}` : ''}${why ? `&why=${why}` : ''}`);
@@ -1411,7 +1479,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       window.clearTimeout(this.syncRetryTimer);
       this.setStatus(this.liveState());
       this.hookQueue = this.hookQueue.then(() => this.runAuto(ctx.auto)).catch((err) => console.error('[dropit] auto', err));
-      if (ctx.written.length) this.announce(ctx.written);
+      if (ctx.written.length) this.announce(ctx.written, why === 'repull');
       else if (verbose) new Notice(t.nothingNew);
       // Syncing by hand is also when real-time gets another try — e.g. right after upgrading, or once the key works again.
       if (verbose && this.noRealtime) { this.noRealtime = false; this.connect(); }
@@ -1435,6 +1503,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       }
       if (verbose) errorNotice(`dropit: ${err.message}`, err);
     } finally {
+      this.repulling = false;
       this.dropFetched();
     }
     return ctx.written.length;
@@ -1481,13 +1550,22 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     this.fetched.clear();
   }
 
-  /** One Notice per sync, however many arrived; clicking it opens the last note. */
-  announce(written) {
+  /**
+   * One Notice for what arrived, however many syncs it took: items that come one after another while the last Notice is
+   * still up replace it with one that counts them all, instead of a stack of them. Clicking it opens the last note.
+   * Pulling again by hand is not an arrival: it says how many came back, and doesn't join the count of what just arrived.
+   */
+  announce(written, pulledAgain = false) {
     const last = written[written.length - 1].note;
+    const now = Date.now();
+    const prev = !pulledAgain && this.arrival && now - this.arrival.at < ARRIVAL_JOIN_MS ? this.arrival : null;
+    prev?.notice?.hide?.();
+    const n = written.length + (prev?.n ?? 0);
     const notice = new Notice(createFragment((f) => {
-      f.createDiv({ text: t.received(written.length) });
+      f.createDiv({ text: pulledAgain ? t.pulledBack(written.length) : t.received(n) });
       f.createDiv({ text: t.openNote(basename(last)), cls: 'dropit-notice-link' });
     }), 6_000);
+    if (!pulledAgain) this.arrival = { n, at: now, notice };
     (notice.messageEl ?? notice.noticeEl)?.addEventListener('click', () => this.app.workspace.openLinkText(last, '', false));
   }
 
@@ -1518,9 +1596,12 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     if (dest && !this.app.vault.getFileByPath(dest.path)) dest = null;
 
     const starts = !dest;
+    const earlier = dest?.parts ?? [];
     const out = dest ? await this.addMember(dest, item) : await this.startEntry(item);
     dest = out.dest;
-    if (group) this.settings.batches[group.id] = { ...dest, at: Date.now() };
+    // What each part of the note starts with, by the place it was sent in: a part that arrives later is put where its number says
+    const parts = Number.isInteger(group?.i) && out.block ? [...earlier.filter((x) => x.i !== group.i), { i: group.i, head: out.block.slice(0, BLOCK_HEAD) }] : earlier;
+    if (group) this.settings.batches[group.id] = { path: dest.path, kind: dest.kind, at: Date.now(), ...(parts.length ? { parts } : {}) };
     this.settings.maxSeq = Math.max(this.settings.maxSeq, seq);
     (out.missing ? ctx.index?.missing : ctx.index?.written)?.set(seq, dest.path);
     const payload = payloadOf(item, dest.path, out.files);
@@ -1543,6 +1624,8 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     for (const file of vault.getMarkdownFiles()) {
       const fm = metadataCache.getFileCache(file)?.frontmatter;
       if (!fm) continue;
+      // A note of another account (it carries that account's mark) is not this account's item with the same number; a note with no mark is as before
+      if (this.settings.accountTag && fm.dropit_account != null && !sameAccountMark(fm.dropit_account, this.settings.accountTag)) continue;
       for (const s of listOf(fm.dropit_seq)) written.set(Number(s), file.path);
       for (const s of listOf(fm.dropit_missing)) missing.set(Number(s), file.path);
       if (fm.dropit_batch) batches.set(String(fm.dropit_batch), file.path);
@@ -1569,7 +1652,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       await vault.process(vault.getFileByPath(path),
         (s) => withSource(joinBlock(s, [entryHeading(item)], '\n\n'), out.lines, '\n', out.src, shared));
       if (!out.missing) addToRanges(this.settings.appended, item.seq);
-      return { dest: { path, kind: 'append' }, files: out.files, missing: out.missing };
+      return { dest: { path, kind: 'append' }, files: out.files, missing: out.missing, block: out.lines.join('\n') };
     }
     const folder = normalizePath(this.settings.folder || '/');
     await this.ensureFolder(folder);
@@ -1577,7 +1660,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     let path = normalizePath(`${folder}/${base}.md`);
     for (let n = 2; vault.getAbstractFileByPath(path); n++) path = normalizePath(`${folder}/${base} ${n}.md`);
     const out = await this.memberLines(item, path);
-    const content = withSource(frontMatter(item, out.missing ? 'dropit_missing' : 'dropit_seq'), out.lines, '\n\n', out.src, shared);
+    const content = withSource(frontMatter(item, out.missing ? 'dropit_missing' : 'dropit_seq', undefined, this.settings.accountTag), out.lines, '\n\n', out.src, shared);
     try {
       await vault.create(path, content);
     } catch (err) {
@@ -1589,7 +1672,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       if (out.missing) this.settings.missingAt[item.seq].path = path;
       await vault.create(path, content);
     }
-    return { dest: { path, kind: 'note' }, files: out.files, missing: out.missing };
+    return { dest: { path, kind: 'note' }, files: out.files, missing: out.missing, block: out.lines.join('\n') };
   }
 
   /**
@@ -1607,9 +1690,13 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       } catch (err) { console.error('[dropit] front matter', dest.path, err); }
     }
     // The source line goes in even when the download failed: pulling again swaps only the warning line.
-    await vault.process(file, (s) => addToOriginal(s, out.lines, dest.kind === 'note' ? '\n\n' : '\n', out.src, !!groupOf(item)));
+    const gap = dest.kind === 'note' ? '\n\n' : '\n';
+    // In the order it was sent (BAT-05): before the first part that was sent after it, when that part can be found; otherwise at the end
+    const sent = groupOf(item)?.i;
+    const later = Number.isInteger(sent) ? (dest.parts ?? []).filter((x) => x.i > sent).sort((a, b) => a.i - b.i) : [];
+    await vault.process(file, (s) => insertSent(s, out.lines, gap, later) ?? addToOriginal(s, out.lines, gap, out.src, !!groupOf(item)));
     if (dest.kind === 'append' && !out.missing) addToRanges(this.settings.appended, item.seq);
-    return { dest, files: out.files, missing: out.missing };
+    return { dest, files: out.files, missing: out.missing, block: out.lines.join('\n') };
   }
 
   /**
@@ -1766,7 +1853,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
         await new Promise((r) => window.setTimeout(r, HOOK_GAP_MS));
       }
       // The agent rules get it after the sync. An item of a batch waits for the rest of its batch (see batchSeen)
-      if (ctx?.auto) {
+      if (ctx?.auto && !ctx.noAuto) {
         const unit = payload.batch ? this.batchSeen(payload) : undefined;
         if (unit === undefined) ctx.auto.push(payload);
         else if (unit) ctx.auto.push(unit);
@@ -1817,7 +1904,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
   /** Is there a rule that would run by itself on what arrives */
   autoOn() {
     const A = this.settings.agents;
-    return isDesktop() && A.consented && !A.paused && A.handlers.some((r) => r.enabled && r.auto);
+    return !this.repulling && isDesktop() && A.consented && !A.paused && A.handlers.some((r) => r.enabled && r.auto);
   }
 
   /**
@@ -2475,7 +2562,11 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       this.settings.fullNoticedDay = day;
       return void await this.save();
     }
-    if (why === 'trial_over') return void await this.trialMoment('T3', this.realtimeUntil ?? 'end', err);
+    if (why === 'trial_over') {
+      await this.trialMoment('T3', this.realtimeUntil ?? 'end', err);
+      await this.accountNow();                       // for the status bar's plans item (the notice above is once per period; this stays)
+      return void this.refreshUpsell();
+    }
     if (this.settings.noRealtimeNoticed) return;
     this.settings.noRealtimeNoticed = true;
     await this.save();
@@ -2491,14 +2582,15 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     if (kind && !(await this.claimMoment(kind, period, { T2: 'trialEndingNoticed', T3: 'noRealtimeNoticed' }[kind]))) return;
     const m = await this.accountNow();
     if (m?.plan === 'paid') return;                                      // Paid hears nothing about the free plan
-    const n = trialDaysOf(m, m && !(m.trial_days > 0) ? await this.plansNow() : null);
-    const link = upgradeLink(err?.data) ?? upgradeLink(m);
-    const enjoyed = m ? t.enjoyed(trialFacts(m, n)) : '';
-    const paid = link ? t.paidKeeps : '';
-    const text = kind === 'T1' ? t.trialSoon(t.daysLeft(left), n, enjoyed, paid)
-      : kind === 'T2' ? t.trialEnding(n, enjoyed, paid)
-        : kind === 'T3' ? t.trialOver(n, enjoyed, paid) : t.noRealtime(n, enjoyed, paid);
-    linkNotice(text, link, t.upgradeFor('realtime'), 15_000);
+    // To the plans page, not straight to checkout: the person isn't stuck on anything, so they pick (`buy=` is dropped)
+    const link = planLink(err?.data, 'realtime') ?? planLink(m, 'realtime');
+    const plans = link || (m && !(m.trial_days > 0)) ? await this.plansNow() : null;
+    const n = trialDaysOf(m, plans);
+    const v = momentFacts(m, plans, n, !!link);
+    if (!kind) v.days = null;                                          // a plan with no real-time at all: not "these days of the trial"
+    const text = t.moment(kind ?? 'N', v, kind === 'T1' ? t.daysLeft(left) : undefined);
+    const p = planPrices(plans, m);
+    linkNotice(text, link, t.keepLabel(p), 15_000, t.keepNote(p));
   }
 
   /**
@@ -2525,14 +2617,55 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     if (!fresh && this.meCache && Date.now() - this.meCache.at < 600_000) return this.meCache.m;
     try {
       const m = await this.api('GET', '/v1/me');
+      const prev = this.meCache?.m;
       this.meCache = { m, at: Date.now() };
+      this.planSeen(m, prev);
+      this.noteAccount(m).catch(() => {});           // not waited for: the caller's answer is not held up by it
+      this.refreshUpsell();
       return m;
     } catch { return null; }
   }
 
+  /**
+   * An account read that shows Paid while real-time was stopped for the trial's end (or its full house): the stop no longer
+   * holds, so it is lifted and the connection tried at once — the status says so now, not after the next sync by hand.
+   */
+  planSeen(m, prev) {
+    if (!m || this.unloaded || !this.settings.token) return;
+    // The plan or its end date is not what was read last time: the status bar and the account card say so now, not at the next sync
+    if (prev && (prev.plan !== m.plan || prev.paid_until !== m.paid_until)) {
+      if ('realtime_until' in m) this.realtimeUntil = m.realtime_until;
+      if (this.tab?.stateSetting) { this.tab.accountRead = m; this.tab.paintAccount(this.tab.stateSetting, m); }
+      this.setStatus(this.state);
+    }
+    if (m.plan !== 'paid' || !this.noRealtime) return;
+    this.noRealtime = false;
+    this.realtimeWhy = null;
+    this.realtimeUntil = null;
+    this.connect();
+    this.tab?.onStatus?.();
+  }
+
+  /**
+   * Which account the notes belong to, so that the same vault paired with another account does not take that account's
+   * item 10 for its own. Only a short hash is kept and written (the service gives no account number: the account's start time stands in for it).
+   */
+  async noteAccount(m) {
+    if (!Number.isFinite(m?.created_at)) return;
+    const tag = (await dkhOf(`dropit-account:${m.created_at}`)).slice(0, 8);
+    if (this.settings.accountTag === tag) return;
+    this.settings.accountTag = tag;
+    await this.save().catch(() => {});
+  }
+
   /** The plans, for the one number the account may not give (the trial's length) */
   async plansNow() {
-    try { return await this.api('GET', '/v1/plans'); } catch { return null; }
+    if (this.plansCache && Date.now() - this.plansCache.at < 600_000) return this.plansCache.plans;
+    try {
+      const plans = await this.api('GET', '/v1/plans', null, !!this.settings.token);
+      this.plansCache = { plans, at: Date.now() };
+      return plans;
+    } catch { return null; }
   }
 
   /**
@@ -2544,11 +2677,19 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       const s = this.settings;
       const now = Date.now();
       const endsOn = paidEndingIn(m, now);
-      if (endsOn && await this.claimMoment('P1', m.paid_until)) new Notice(t.paidEnding(endsOn), 15_000);
+      if (endsOn && await this.claimMoment('P1', m.paid_until)) {
+        // A paid account is given no link, so the renewal link is made when it is clicked (see openPlans)
+        const plans = await this.plansNow();
+        const line = plans?.limits?.paid ? t.limitsLine(plans.limits.paid, false) : '';
+        const text = t.paidEnding(endsOn, line);
+        if (plans?.payments?.open === false) new Notice(text, 15_000);
+        else linkNotice(text, () => this.openPlans(), t.renew(planPrices(plans, m)), 15_000);
+      }
       if (s.lastPlan === 'paid' && m?.plan === 'free' && Number.isFinite(m.paid_until) && m.paid_until <= now && Number.isFinite(m.paid_grace_until)) {
         if (await this.claimMoment('P2', s.lastPaidUntil || m.paid_until)) {
-          const items = Number.isFinite(m.items_total) ? m.items_total : 0;
-          linkNotice(t.paidEnded(items, localDate(m.paid_grace_until)), upgradeLink(m), t.renew, 15_000);
+          const plans = await this.plansNow();
+          const line = plans?.limits?.free ? t.limitsLine(plans.limits.free, false) : '';
+          linkNotice(t.paidEnded(localDate(m.paid_grace_until), line), planLink(m, 'account'), t.getAgain, 15_000);
         }
       }
       const plan = m?.plan === 'paid' ? 'paid' : m?.plan === 'free' ? 'free' : s.lastPlan;
@@ -2645,7 +2786,36 @@ const DropitPlugin = class DropitPlugin extends Plugin {
             : typeof tip === 'function' ? tip(this.error ?? '') : tip);
       this.statusEl.setAttribute('data-tooltip-position', 'top');
     }
+    this.refreshUpsell();
     this.tab?.onStatus?.();
+  }
+
+  /**
+   * Shows the status bar's plans item only to a free account that has a way to Paid, and only when it matters: the trial is
+   * about to end (three days or less) or has ended. Reads what is already known (the account read last); asks for nothing.
+   */
+  refreshUpsell() {
+    if (!this.upEl) return;
+    const m = this.meCache?.m;
+    const left = this.realtimeUntil == null ? null : this.realtimeUntil - Date.now();
+    const matters = this.realtimeWhy === 'trial_over' || (left != null && left > 0 && left <= 3 * DAY_MS);
+    this.upEl.toggle?.(!!(this.settings.token && matters && m?.plan === 'free' && upgradeLink(m)));
+  }
+
+  /**
+   * Opens the plans page. A free account uses the link its account gives (no `buy=`: the page opens on the plans, the person
+   * picks); a paid account has none, so the way to renew is asked for now — a click is the only time this asks, and the link
+   * is made at that moment, so it is never out of date.
+   */
+  async openPlans({ why = 'account' } = {}) {
+    try {
+      const m = await this.accountNow();
+      let url = m && m.plan !== 'paid' ? planLink(m, why) : null;
+      if (!url && m?.plan === 'paid') url = tagSrc(safeLink((await this.api('POST', '/v1/checkout', { plan: 'year_once', from: 'obsidian' }))?.checkout_url));
+      if (url) window.open(url); else new Notice(t.plansUnavailable);
+    } catch (err) {
+      new Notice(err?.code === 'RATE_LIMITED' ? t.linkTooMany : t.linkFailed(err?.message ?? ''));
+    }
   }
 
   openSettings() {
@@ -2658,13 +2828,24 @@ const DropitPlugin = class DropitPlugin extends Plugin {
    * skipped (deliver() checks), so this fills in what's missing and retries failed downloads.
    * The server only hands this device items after the point it was reset to, so the reset must succeed.
    */
-  async repull(mode, n) {
-    if (mode !== 'all' && !(Number.isInteger(n) && n >= 1)) throw new Error(t.repullNumber);
+  /**
+   * Pull what was received before. `recent`: the latest `n` items that are also no older than `days` days — both limits, at
+   * most REPULL_MAX_ITEMS and the days the account keeps items (see repullRange). `last` / `days` / `all` are the single-limit forms.
+   */
+  async repull(mode, n, days) {
+    if (mode !== 'all' && !(Number.isFinite(n) && n >= 1)) throw new Error(t.repullNumber);
+    let count = n;
+    let since = mode === 'days' ? Date.now() - n * DAY_MS : 0;
+    if (mode === 'recent') {
+      const range = repullRange(n, days, await this.accountNow(), (await this.plansNow()) ?? this.plansCache?.plans);
+      count = range.count;
+      since = Date.now() - range.days * DAY_MS;
+    }
     await this.running;                              // a sync already running would write its cursor over the reset
-    const res = await this.api('POST', '/v1/cursor/reset', mode === 'last' ? { last: n } : { to_seq: 0 });
-    this.settings.cursor = mode === 'last' ? (res.to_seq ?? 0) : 0;
+    const res = await this.api('POST', '/v1/cursor/reset', mode === 'last' || mode === 'recent' ? { last: count } : { to_seq: 0 });
+    this.settings.cursor = mode === 'last' || mode === 'recent' ? (res.to_seq ?? 0) : 0;
     await this.save();
-    await this.sync(true, { since: mode === 'days' ? Date.now() - n * 86_400_000 : 0, why: 'repull' });
+    await this.sync(true, { since, why: 'repull' });
   }
 
   // ── Send ──────────────────────────────────────────────────────────────
@@ -2782,6 +2963,20 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     if (sent) new Notice(t.sent(sent));
   }
 
+  /**
+   * The refusal for a file over what this account allows for one item: the limit, and — for a free account with a way to Paid,
+   * when Paid would take the file — what Paid takes and the link to it. The numbers are the service's; a file over what even Paid takes
+   * gets the reason only.
+   */
+  async tooBigError(cap, bytes) {
+    const text = t.tooLarge(`${Math.round((cap / 1_048_576) * 10) / 10} MB`);
+    const m = this.meCache?.m;
+    const url = m ? safeLink(withWhy(m.upgrade_url, 'file_size')) : null;      // errorNotice tags it when it is shown
+    const paid = url ? Number((await this.plansNow())?.limits?.paid?.fileMB) : NaN;
+    if (!url || !(paid > 0) || paid * 1_048_576 <= cap || bytes > paid * 1_048_576) return new ApiError(text, { code: 'PAYLOAD_TOO_LARGE' });
+    return new ApiError(`${text}. ${t.paidTakes(paid)}`, { code: 'PAYLOAD_TOO_LARGE', data: { upgrade_url: url, why: 'file_size' } });
+  }
+
   /** One request: the file is the body, everything else is in the address */
   async uploadFile(file, group, to = this.sendTo()) {
     // The file is read whole before it goes, so one far past anything that can be sent is refused before it is read into memory
@@ -2793,14 +2988,14 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       const limit = (size != null ? await this.accountNow() : this.meCache.m)?.item_bytes_limit;
       if (Number.isFinite(limit) && limit > 0) cap = Math.min(limit, MAX_FILE_BYTES);
     }
-    const tooBig = () => new Error(t.tooLarge(`${Math.round((cap / 1_048_576) * 10) / 10} MB`));
-    if (size != null && size > cap) throw tooBig();
+    const tooBig = (bytes) => this.tooBigError(cap, bytes);
+    if (size != null && size > cap) throw await tooBig(size);
     // A file is in memory from here until it is sent: only so much at the same time, the rest wait their turn
     let res;
     const release = await this.sendMemory.acquire(size ?? cap);
     try {
       const data = await this.app.vault.readBinary(file);
-      if (data.byteLength > cap) throw tooBig();
+      if (data.byteLength > cap) throw await tooBig(data.byteLength);
       const q = new URLSearchParams({ source: 'obsidian', name: file.name });
       if (to) q.set('to', to.join(','));
       if (group) { q.set('group', group.id); q.set('i', String(group.i)); q.set('n', String(group.n)); }
@@ -2857,12 +3052,13 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   async adopt({ token, device_id, replaced }) {
     if (replaced && replaced.how !== 'issuer') new Notice(t.replacedOld(replaced.name));
-    Object.assign(this.settings, { token, device_id, previous_token: '', cursor: 0, maxSeq: 0, batches: {}, batchRuns: {}, sent: [], appended: [], missingAt: {}, targets: [],
+    Object.assign(this.settings, { token, device_id, accountTag: '', previous_token: '', cursor: 0, maxSeq: 0, batches: {}, batchRuns: {}, sent: [], appended: [], missingAt: {}, targets: [],
       noRealtimeNoticed: false, trialEndingNoticed: false, fullNoticedDay: null,
       moments: {}, lastPlan: '', lastPaidUntil: 0, momentsCheckedAt: 0 });
     Object.assign(this, { noRealtime: false, realtimeWhy: null, realtimeUntil: null, authLost: null });
     this.batchMembers.clear();
     await this.save();
+    await this.noteAccount(await this.accountNow(true));      // which account this is, before its first notes are written
     await this.sync(true, { why: 'pair' });
     this.connect();
     this.refreshEndpoints();
@@ -2881,6 +3077,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
     }
     Object.assign(this.settings, { token: '', device_id: '', previous_token: previous, cursor: 0, maxSeq: 0, batches: {}, batchRuns: {}, sent: [], appended: [], missingAt: {}, targets: [] });
     this.batchMembers.clear();
+    this.meCache = null;
     await this.save();
     this.dropSocket();
     this.cancelReconnect();
@@ -2889,15 +3086,32 @@ const DropitPlugin = class DropitPlugin extends Plugin {
 
   // ── Plumbing ──────────────────────────────────────────────────────────
 
-  /** The addresses to try, in order. The built-in one is always last, so a stale address heals itself. */
+  /**
+   * The addresses to try, in order. With the default setup the built-in one is always last, so a stale address heals itself.
+   * An address the user typed in themselves (their own server, or one on this machine) is the only one used: if it is
+   * down, nothing is sent anywhere else, and the key never leaves for the built-in address.
+   */
   endpointList() {
     // Only addresses worth sending the key to: https, or this machine (running the service locally)
     const list = (this.settings.endpoints ?? []).map((e) => String(e).trim().replace(/\/+$/, '')).filter((e) => SAFE_BASE.test(e));
+    if (this.ownEndpoint()) return [...new Set(list)];        // possibly none (an address that isn't safe to send the key to): then nothing is sent
     return [...new Set([...list, DEFAULT_ENDPOINT])];
   }
 
+  /**
+   * True when the user chose the server address themselves. Set by the address field in the settings; for a vault set up
+   * before that was recorded, a list made only of addresses on this machine counts as chosen too.
+   */
+  ownEndpoint(list = this.settings.endpoints ?? []) {
+    if (!list.length) return false;
+    const flag = this.settings.ownEndpoint;
+    if (flag === true) return true;
+    if (flag === false) return false;
+    return list.every((e) => /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(String(e).trim()));
+  }
+
   base() {
-    return this.endpointList()[0];
+    return this.endpointList()[0] ?? String(this.settings.endpoints?.[0] ?? DEFAULT_ENDPOINT);
   }
 
   /**
@@ -2932,7 +3146,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       }
       if (!res) continue;
       if (base !== list[0]) {
-        this.settings.endpoints = [base, ...list.filter((e) => e !== base && e !== DEFAULT_ENDPOINT)];
+        this.settings.endpoints = [base, ...list.filter((e) => e !== base && (this.ownEndpoint() || e !== DEFAULT_ENDPOINT))];
         await this.save();
       }
       const data = safeJson(res) ?? {};
@@ -2947,6 +3161,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
    * and a wrong list must not drop it.
    */
   async refreshEndpoints() {
+    if (this.ownEndpoint()) return;            // an address the user chose is theirs to change: nothing learned from it is added
     try {
       const { endpoints } = await this.api('GET', '/v1/endpoints', null, false);
       if (Array.isArray(endpoints) && endpoints.length) {
@@ -3007,8 +3222,12 @@ const clock = (seconds, now = Date.now()) => {
 /** The sentence for an error answer from the service. Numbers come from the answer, never from here (same choices as the extension and the CLI). */
 function errorText(code, data = {}, status, tt = t, now = Date.now()) {
   if (code === 'PAYLOAD_TOO_LARGE' && data.field === 'size' && data.limit) return tt.tooLarge(`${mb(data.limit).replace(/\.0$/, '')} MB`);
+  // A text over what one item can hold: said as a text (the limit is the same on every plan), with the number from the answer
+  if (code === 'PAYLOAD_TOO_LARGE' && (data.field === 'raw' || data.field === 'body') && data.limit) return tt.textTooLong(`${mb(data.limit).replace(/\.0$/, '')} MB`);
   if (code === 'RATE_LIMITED' && data.window === 'day') {
     const back = clock(data.retry_after ?? 0, now);
+    // Joining a device is limited by its own count: it is not about sends
+    if (data.field === 'pairings') return tt.ratePairings(back);
     return data.field === 'uploads' ? tt.rateDayUploads(back) : data.field === 'downloads' ? tt.rateDayDownloads(back) : tt.rateDay(back);
   }
   if (code === 'RATE_LIMITED' && data.window === 'hour') return tt.rateHour;
@@ -3035,14 +3254,73 @@ const safeLink = (u) => {
  * The upgrade link of an error or of the account, ready to open: a safe link, tagged with where it was opened
  * (`src=obsidian`). Null when there is none — none was given, or the limit is the hourly one (waiting is the way past it).
  */
-const upgradeLink = (data) => {
-  if (data?.window === 'hour') return null;
-  const url = safeLink(data?.upgrade_url);
+const tagSrc = (url) => {
   if (!url) return null;
   const h = url.indexOf('#');                     // src goes before a #fragment: after it, it would be part of the fragment
   const base = h < 0 ? url : url.slice(0, h);
   return `${base}${base.includes('?') ? '&' : '?'}src=obsidian${h < 0 ? '' : url.slice(h)}`;
 };
+const upgradeLink = (data, why) => (data?.window === 'hour' ? null : tagSrc(withoutBuy(safeLink(why ? withWhy(data?.upgrade_url, why) : data?.upgrade_url))));
+
+/** The link without `buy=`: it opens the plans page (price and what is bought, the yearly plan in view), never straight to a checkout */
+const withoutBuy = (url) => (url ? String(url).replace(/&buy=[^&#]*/, '').replace(/\?buy=[^&#]*&?/, '?').replace(/\?(?=#|$)/, '') : url);
+
+/** The same link saying what it was opened for (`why`): the account's own link says `account`, which is not what stopped anyone */
+const withWhy = (url, why) => {
+  if (!url || !why) return url;
+  const out = String(url);
+  return /[?&]why=/.test(out) ? out.replace(/([?&]why=)[^&#]*/, `$1${why}`) : out.replace(/^([^#]*?)(#|$)/, `$1${out.includes('?') ? '&' : '?'}why=${why}$2`);
+};
+
+/**
+ * The same link, saying what it was opened for (`why`, one of the service's own). The rest — the signed part — is left as it was.
+ */
+const planLink = (data, why) => {
+  const url = upgradeLink(data);
+  return url ? withWhy(url, why) : null;
+};
+
+/** Money as the plans give it (cents and a currency), written like the website does: $1.90, $19 */
+const money = (x) => {
+  if (!Number.isFinite(x?.cents) || x.cents <= 0) return '';
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: x.currency || 'USD', minimumFractionDigits: x.cents % 100 ? 2 : 0 }).format(x.cents / 100);
+  } catch { return ''; }
+};
+
+/** The prices a moment may name, from /v1/plans: the first month (only while it is on offer to this account), the year, a one-time year. '' = unknown, not written */
+function planPrices(plans, m) {
+  const by = (id) => (plans?.plans ?? []).find((p) => p?.id === id);
+  const year = by('year');
+  return {
+    trial: m?.trial_available === false ? '' : money(year?.trial),
+    year: money(year?.price),
+    once: money(by('year_once')?.price),
+  };
+}
+
+/** Customers with this many items, or more than one device, get the fuller sentence (what they did, what Paid adds) */
+const RICH_ITEMS = 10;
+
+/**
+ * Everything a trial moment's sentence may say, from the account and the plans — and only that: what the service didn't give is left out.
+ * `days` is set only while the account's items still mostly belong to the trial (the total counts from sign-up).
+ */
+function momentFacts(m, plans, n, linked, now = Date.now()) {
+  const f = trialFacts(m, n, now);
+  const inTrial = !!n && Number.isFinite(m?.created_at) && now - m.created_at <= (n + 3) * DAY_MS;
+  const num = (x) => (Number.isFinite(x) && x > 0 ? x : null);
+  const paid = plans?.limits?.paid;
+  return {
+    days: inTrial ? f.days : null,
+    items: f.items,
+    devices: f.devices,
+    kept: num(m?.kept_days) ?? num(plans?.limits?.free?.days),
+    rich: f.items >= RICH_ITEMS || f.devices > 1,
+    linked,
+    perks: paid ? { perDay: num(paid.perDay), fileMB: num(paid.fileMB), devices: num(paid.devices), days: num(paid.days) } : null,
+  };
+}
 
 /** How many days items are kept: what the service says, else what the plan has always had */
 const keptDays = (m) => (Number.isFinite(m?.kept_days) ? m.kept_days : m?.plan === 'paid' ? 10 : 1);
@@ -3114,13 +3392,42 @@ function reconcileTargets(saved, list) {
   const kept = want.filter((id) => have.has(id));
   return { ids: kept, gone: want.length - kept.length };
 }
-/** The one line a folded group shows: All, the device's name, or how many */
-function targetsSummary(saved, list) {
-  // Before the device list is read, only the number is known
-  if (!list) return cleanTargets(saved).length ? t.set.deviceN(cleanTargets(saved).length) : t.set.allDevices;
-  const kept = cleanTargets(saved).filter((id) => list.some((d) => d.device_id === id));
-  if (!kept.length) return t.set.allDevices;
-  return kept.length === 1 ? list.find((d) => d.device_id === kept[0]).name : t.set.deviceN(kept.length);
+/**
+ * What the days slider of Pull again can do, from the account and the plans — numbers only from the service:
+ * `track` is the whole length drawn (the days Paid keeps items, so a free account sees what it would get), `allowed` is how far
+ * this account may actually slide (the days its own items are kept, at most what Paid keeps; 1 when that is not known — free
+ * keeps 1 day), and `paid` is the days Paid keeps (null when the plans could not be read).
+ */
+function repullDays(m, plans) {
+  const whole = (x) => (Number.isFinite(x) && x >= 1 ? Math.floor(x) : null);
+  const paid = whole(plans?.limits?.paid?.days);
+  const kept = whole(m?.kept_days) ?? 1;
+  const allowed = Math.max(1, paid ? Math.min(kept, paid) : kept);
+  return { track: Math.max(allowed, paid ?? 1), allowed, paid };
+}
+
+/** The two slider values as they go to the service: items 1–50, days 1 to what the account may reach (anything else, as the default) */
+function repullRange(count, days, m, plans) {
+  const { allowed } = repullDays(m, plans);
+  const n = Number.isFinite(count) ? Math.round(count) : REPULL_DEFAULT_ITEMS;
+  const d = Number.isFinite(days) ? Math.round(days) : REPULL_DEFAULT_DAYS;
+  return { count: Math.min(REPULL_MAX_ITEMS, Math.max(REPULL_MIN_ITEMS, n)), days: Math.min(allowed, Math.max(1, d)) };
+}
+
+/**
+ * The line under the days slider when a free account tries to move it: what free keeps, what Paid would give, and — only when
+ * the account came with a way to Paid and payments are on — the link's words. No link means nothing to click, not a dead one.
+ */
+function repullHint(m, plans) {
+  const { allowed, paid } = repullDays(m, plans);
+  const link = m?.plan !== 'paid' && plans?.payments?.open !== false && upgradeLink(m) ? t.repullSeePlans : null;
+  return { text: t.repullHint(allowed, paid > allowed ? paid : null), link };
+}
+
+/** Where a send goes by default, in a few words: All, or how many of the devices there now */
+function defaultLabel(saved, list) {
+  const kept = cleanTargets(saved).filter((id) => (list ?? []).some((d) => d.device_id === id));
+  return kept.length ? t.set.deviceN(kept.length) : t.set.allDevices;
 }
 
 /**
@@ -3131,13 +3438,17 @@ function errorNotice(text, err, timeout = 8_000) {
   return linkNotice(text, upgradeLink(err?.data), t.upgradeFor(err?.data?.why), timeout);
 }
 
-/** A Notice with one link under the text (none when there is no link to open) */
-function linkNotice(text, url, label, timeout = 8_000) {
+/**
+ * A Notice with one link on a line of its own under the text (none when there is no link to open), and an optional small
+ * line under that. `url` may be a function: the link is made when it is clicked.
+ */
+function linkNotice(text, url, label, timeout = 8_000, note = '') {
   if (!url) return new Notice(text, timeout);
   return new Notice(createFragment((f) => {
     f.createDiv({ text });
-    const a = f.createEl('a', { text: label, href: url, cls: 'dropit-notice-link' });
-    a.addEventListener('click', (ev) => { ev.preventDefault(); window.open(url); });
+    const a = f.createEl('a', { text: label, href: typeof url === 'function' ? '#' : url, cls: 'dropit-notice-link' });
+    a.addEventListener('click', (ev) => { ev.preventDefault(); if (typeof url === 'function') url(); else window.open(url); });
+    if (note) f.createDiv({ text: note, cls: 'dropit-notice-note' });
   }), Math.max(timeout, 12_000));
 }
 
@@ -3291,10 +3602,20 @@ async function deviceKeyOf(app, store) {
   }
 }
 /** A front-matter value: as is when YAML can't misread it, otherwise a quoted string (JSON's quoting is valid YAML) */
+/**
+ * Is the account mark a note carries the one in use. The mark is written quoted, but notes from before were not: a mark of only
+ * digits (05092591) or of the form 1e5 was read back as a number, so a number is compared as the number the mark would have been.
+ */
+function sameAccountMark(value, tag) {
+  if (typeof value !== 'number') return String(value) === String(tag);
+  if (/^\d+(e\d+)?$/i.test(tag) && Number(tag) === value) return true;
+  return /^0[0-7]+$/.test(tag) && parseInt(tag, 8) === value;        // a leading 0 made some of them octal
+}
+
 const yamlValue = (v) => (/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(String(v)) ? String(v) : JSON.stringify(String(v)));
 
 /** A new note's front matter, written with the note: the same keys a later item adds to with processFrontMatter */
-function frontMatter(item, seqKey, nonce = newNonce()) {
+function frontMatter(item, seqKey, nonce = newNonce(), account = '') {
   const group = groupOf(item);
   return [
     '---',
@@ -3305,6 +3626,7 @@ function frontMatter(item, seqKey, nonce = newNonce()) {
     // batch cannot know that number, so it cannot write a line that passes for ours
     ...(group ? [`dropit_batch: ${yamlValue(group.id)}`, 'dropit_answered: false', `dropit_nonce: "${nonce}"`] : []),
     `${seqKey}: ${Number(item.seq)}`,
+    ...(account ? [`dropit_account: ${JSON.stringify(String(account))}`] : []),      // always quoted: 05092591 or 1e5 unquoted is a number to YAML
     '---',
     '',
   ].join('\n');
@@ -3406,11 +3728,17 @@ function topic(item) {
   if (item.kind === 'url' || /^https?:\/\/\S+$/i.test(raw.trim())) {
     try { const u = new URL(raw.trim()); return `${u.hostname}${u.pathname === '/' ? '' : u.pathname}`; } catch { /* as text */ }
   }
-  const line = raw.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-  return line
+  // The first line that says something: one that is only `---`, `***`, `===` or a bare marker has nothing a name could use
+  const clean = (l) => l
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')    // [text](link) → text
     .replace(/^[#>*\-+\s]+|[`*_~]/g, '')
     .replace(/^\d+\.\s+/, '');
+  // Each line is cut before it is cleaned, so one enormous line cannot make the link pattern crawl; stop at the first usable line
+  for (const line of raw.split('\n')) {
+    const l = clean(line.trim().slice(0, 200));
+    if (/[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(l)) return l;
+  }
+  return '';
 }
 
 /** Text as sent, with its source line below when it has one. */
@@ -3875,6 +4203,20 @@ function addToOriginal(s, lines, gap, src, shared) {
   // A source line the note does not end with yet goes last, as it does without an answer
   return src && !out.replace(/\s+$/, '').endsWith(src) ? `${out.replace(/\s+$/, '')}\n\n${src}\n` : out;
 }
+/**
+ * A part of a batch that was sent before parts already in the note: put right before the first of them that can be found
+ * (each is known by how it starts, at the start of a line). Null when none is found — the caller then adds it at the end.
+ */
+function insertSent(s, lines, gap, later) {
+  for (const b of later) {
+    if (!b.head) continue;
+    for (let at = s.indexOf(b.head); at >= 0; at = s.indexOf(b.head, at + 1)) {
+      if (at > 0 && s[at - 1] !== '\n') continue;
+      return `${s.slice(0, at)}${lines.join('\n')}${gap}${s.slice(at)}`;
+    }
+  }
+  return null;
+}
 /** Put the parts of a batch read back from its note in the order its items were sent, as far as that is remembered (the rest stay where they are, last) */
 function sentParts(parts, order) {
   const texts = order.filter((o) => o.text && Number.isInteger(o.i)).map((o) => o.i);
@@ -4192,24 +4534,38 @@ class DropitSettingTab extends PluginSettingTab {
     this.plugin = plugin;
     this.pv = { rule: null, sample: 'text' };      // what the "see what dropit runs" window is showing
     // Which groups are open: kept while the page is redrawn, so pressing a button does not fold what you were reading
-    this.fold = { receiving: true, delivery: true, devices: false, advanced: false };
+    this.fold = { receiving: true, devices: false, advanced: false };
   }
 
   display() {
     this.containerEl.empty();
+    this.containerEl.addClass?.('dropit-settings');       // every rule in styles.css for this page hangs under it: nothing leaks to other plugins
     window.clearInterval(this.pairTimer);
     if (this.plugin.settings.token) this.paired(); else { this.setup(); this.advanced(); }
     this.footer();
+    this.tabOrder();
+  }
+
+  /**
+   * Tab goes through the controls and nothing else. A row or a box that can scroll can be focused by the browser by itself
+   * (a stop with no ring, and one that looks like Tab got stuck): these are taken out of the order, and only these.
+   */
+  tabOrder() {
+    this.containerEl.querySelectorAll?.('.setting-item, .setting-item-info, .setting-item-control, .dropit-checks, .dropit-checks-row, .dropit-checks-items, .dropit-limits, .dropit-group-body, .dropit-ai-panel')
+      .forEach((e) => e.setAttribute('tabindex', '-1'));
   }
 
   /** A group that folds: its name and, while folded, one line that says how it is set. Returns where its rows go. */
-  group(key, title, summary = '') {
+  group(key, title, summary = '', icon = '') {
     const d = this.containerEl.createEl('details', { cls: 'dropit-group' });
     d.open = this.fold[key] ?? false;
     d.addEventListener('toggle', () => { this.fold[key] = d.open; });
     const head = d.createEl('summary', { cls: 'dropit-group-head' });
+    // The group's mark, its name, how it is set (while folded) and the arrow: the whole row folds and unfolds
+    if (icon) setIcon?.(head.createSpan({ cls: 'dropit-group-icon' }), icon);
     head.createSpan({ cls: 'dropit-group-title', text: title });
     const sum = head.createSpan({ cls: 'dropit-group-sum', text: summary });
+    setIcon?.(head.createSpan({ cls: 'dropit-group-arrow' }), 'chevron-down');
     return { body: d.createDiv({ cls: 'dropit-group-body' }), setSummary: (s) => sum.setText(s), open: () => { d.open = true; this.fold[key] = true; } };
   }
 
@@ -4221,8 +4577,22 @@ class DropitSettingTab extends PluginSettingTab {
     setIcon?.(i, 'info');
     setTooltip?.(i, text, { placement: 'top', delay: 150 });
     i.setAttribute?.('aria-label', text);
-    i.addEventListener?.('click', (e) => { e.preventDefault(); e.stopPropagation(); new Notice(text, 20_000); });
+    // Reachable by keyboard: it is a button to Tab to, opened with Enter or Space
+    i.setAttribute?.('role', 'button');
+    i.setAttribute?.('tabindex', '0');
+    const open = (e) => { e.preventDefault(); e.stopPropagation(); new Notice(text, 20_000); };
+    i.addEventListener?.('click', open);
+    i.addEventListener?.('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') open(e); });
     return setting;
+  }
+
+  /** A small mark in front of a device row: a phone or a computer, by what the name says; this computer's is filled */
+  deviceMark(setting, d, self = false) {
+    const phone = /phone|pixel|android|ipad|手机|安卓|快捷指令/i.test(d.name ?? '');
+    const mark = setting.settingEl.createDiv?.({ cls: `dropit-device-icon${self ? ' is-self' : ''}` });
+    if (!mark) return;
+    setIcon?.(mark, phone ? 'smartphone' : 'laptop');
+    setting.settingEl.prepend?.(mark);
   }
 
   /** The two quiet links at the very end: where to say what is wrong, and the code */
@@ -4236,43 +4606,71 @@ class DropitSettingTab extends PluginSettingTab {
   }
 
   hide() {
+    this.containerEl.removeClass?.('dropit-settings');
     window.clearInterval(this.pairTimer);
     window.clearTimeout(this.accountTimer);
     this.stateSetting = null;
+    this.accountRead = null;
+    this.redrawRepull = null;
     this.agentsBox = this.previewBox = this.logBox = null;
   }
 
   /**
    * The account line under the connection state. A failed read (the network not up yet right after
-   * Obsidian starts) used to stay on screen under "● Receiving in real time" until the tab was reopened:
+   * Obsidian starts) used to stay on screen under "● Real-time delivery on" until the tab was reopened:
    * now it tries again — sooner when the connection comes back, else after 3 s, 10 s, 30 s.
    */
   loadAccount() {
-    const row = this.stateSetting;
-    if (!row || this.accountBusy) return;
+    if (!this.stateSetting || this.accountBusy) return;
     window.clearTimeout(this.accountTimer);
     this.accountBusy = true;
     const p = this.plugin;
     // Block bodies, never `=> setting.setX()`: Obsidian's Setting has a then(), so returning one from a
     // promise callback makes the promise adopt it — then() hands itself back, forever, and the window hangs.
+    // The answer goes to the line that is on the page when it comes, not the one that asked: the page is drawn again
+    // (twice, when it opens) and the line that asked may be gone by then. What was read is kept, so a line drawn later shows it at once
     p.api('GET', '/v1/me').then((m) => {
       this.accountBusy = false;
       this.accountFailed = false;
-      if (this.stateSetting !== row) return;
-      row.setDesc(t.account(m));
+      this.accountRead = m;
+      const prev = p.meCache?.m;
       p.meCache = { m, at: Date.now() };
+      p.planSeen(m, prev);
+      const row = this.stateSetting;
+      if (!row) return;
+      this.paintAccount(row, m);
+      this.redrawRepull?.();
+      p.refreshUpsell();
       p.accountMoments(m);
       if ('realtime_until' in m) { p.realtimeUntil = m.realtime_until; this.onStatus(); }   // the countdown, fresh
     }, (err) => {
       this.accountBusy = false;
       this.accountFailed = true;
-      if (this.stateSetting !== row) return;
+      const row = this.stateSetting;
+      if (!row) return;
       // Removed from the account: no retrying — the message says what happened, and joining again fixes it
       if (AUTH_LOST.has(err.code)) { row.setDesc(err.message); return; }
       row.setDesc(t.accountRetry(err.message));
       const wait = [3_000, 10_000, 30_000][Math.min(this.accountTries++, 2)];
       this.accountTimer = window.setTimeout(() => this.loadAccount(), wait);
     });
+  }
+
+  /** The account line: its words and, when there is one, the small link after them */
+  paintAccount(row, m) {
+    row.setDesc(t.account(m));
+    this.accountEntry(row, m);
+  }
+
+  /**
+   * A small link after the account line, to the plans page: for a free account that has a way to Paid, and for a paid one that
+   * ends within a week and won't renew itself. Nothing for anyone else (a plan that renews, payments closed).
+   */
+  accountEntry(row, m) {
+    const label = m?.plan === 'paid' ? (paidEndingIn(m) ? t.renewShort : null) : (upgradeLink(m) ? t.seePlans : null);
+    if (!label) return;
+    const a = row.descEl?.createEl?.('a', { text: label, href: '#', cls: 'dropit-account-link' });
+    a?.addEventListener?.('click', (e) => { e.preventDefault(); this.plugin.openPlans({ why: 'account' }); });
   }
 
   /** Called when the connection state changes, so the top line stays true while the tab is open. */
@@ -4284,12 +4682,20 @@ class DropitSettingTab extends PluginSettingTab {
     const left = live && p.trialLeft();
     // Back online after the account line failed: read it now instead of waiting for the timer
     if (live && this.accountFailed) this.loadAccount();
-    this.stateSetting.setName(p.state === 'error' ? t.stateError(p.error ?? '')
+    const line = p.state === 'error' ? t.stateError(p.error ?? '')
       : live ? (left ? t.stateLiveTrial(left) : t.stateLive)
         : connecting ? t.stateConnecting
         : !p.noRealtime ? t.stateOffline
           : p.realtimeWhy === 'trial_over' ? t.stateTrialOver
-            : p.realtimeWhy === 'trial_full' ? t.stateTrialFull : t.stateManual);
+            : p.realtimeWhy === 'trial_full' ? t.stateTrialFull : t.stateManual;
+    // The state glyph in the text (● ○ ◌ ⚠) is drawn as a coloured dot here: green live, amber connecting, red failing, grey otherwise
+    const tone = p.state === 'error' ? 'bad' : live ? 'live' : connecting ? 'busy' : 'idle';
+    const name = this.stateSetting.nameEl;
+    if (name?.empty && name.createSpan) {
+      name.empty();
+      name.createSpan({ cls: `dropit-dot is-${tone}` });
+      name.createSpan({ text: String(line).replace(/^[●○◌⚠]\s*/u, '') });
+    } else this.stateSetting.setName(line);
   }
 
   /**
@@ -4304,11 +4710,42 @@ class DropitSettingTab extends PluginSettingTab {
       .setName(t.haveCode)
       .setDesc(t.haveCodeDesc)
       .addText((x) => x.setPlaceholder('K7M2QX').onChange((v) => { code = v; }))
-      .addButton((b) => b.setButtonText(t.join).setCta().onClick(() => this.run(() => this.plugin.claimCode(code))));
+      .addButton((b) => b.setButtonText(t.join).setCta().onClick(() => this.join(code)));
+    // Why joining was refused, kept under the field until the next try (a Notice would be gone before it is read)
+    this.joinNote = containerEl.createDiv({ cls: 'setting-item-description dropit-join-note' });
+    this.consentLine(t.consentJoin);
     new Setting(containerEl)
       .setName(t.create)
       .setDesc(t.createDesc)
       .addButton((b) => b.setButtonText(t.createButton).onClick(() => this.run(() => this.plugin.createAccount())));
+    this.consentLine(t.consentCreate);
+  }
+
+  /** What joining or creating sends, and the privacy page of the service in use (the one typed under Advanced when there is one) */
+  consentLine(text) {
+    const line = this.containerEl.createDiv({ cls: 'setting-item-description dropit-consent' });
+    line.appendText?.(`${text} `);
+    const url = `${this.plugin.base()}/privacy`;
+    const a = line.createEl?.('a', { text: t.privacyLink, href: url });
+    a?.addEventListener?.('click', (e) => { e.preventDefault(); window.open(url); });
+  }
+
+  /** Join with the code. When the account is full the refusal stays on the page, with the way to more devices */
+  async join(code) {
+    const note = this.joinNote;
+    note?.empty?.();
+    try {
+      await this.plugin.claimCode(code);
+      this.display();
+    } catch (err) {
+      const url = err?.code === 'DEVICE_LIMIT_REACHED' ? upgradeLink(err.data, 'devices') : null;
+      if (err?.code !== 'DEVICE_LIMIT_REACHED' || !note) return void errorNotice(`dropit: ${err.message}`, err);
+      note.createDiv({ text: err.message });
+      if (!url) return;
+      const n = Number((await this.plugin.plansNow())?.limits?.paid?.devices);
+      const a = note.createEl('a', { text: n > 0 ? t.slotUpgradeN(n) : t.slotUpgrade, href: url });
+      a.addEventListener('click', (e) => { e.preventDefault(); window.open(url); });
+    }
   }
 
   paired() {
@@ -4322,13 +4759,15 @@ class DropitSettingTab extends PluginSettingTab {
       .setDesc(t.accountLoading)
       .addButton((b) => b.setButtonText(t.syncNow).onClick(() => this.run(() => p.sync(true))));
     this.stateSetting.settingEl.addClass?.('dropit-status');
+    const logo = this.stateSetting.settingEl.createDiv?.({ cls: 'dropit-logo' });
+    if (logo) { setIcon?.(logo, ICON); this.stateSetting.settingEl.prepend?.(logo); }
     this.onStatus();
     this.accountTries = 0;
+    if (this.accountRead) this.paintAccount(this.stateSetting, this.accountRead);      // drawn again: what was read last time is shown now, and read again
     this.loadAccount();
 
-    // Four groups, in this order: what arrives, what is sent, the devices, and the one rarely-changed address
+    // Three groups, in this order: what arrives, the devices (and where a send goes by default), and the one rarely-changed address
     this.receiving();
-    this.delivery();
     this.devicesGroup();
     this.advanced();
     this.loadDevices();
@@ -4342,7 +4781,7 @@ class DropitSettingTab extends PluginSettingTab {
     const s = p.settings;
     const u = t.set;
     const where = s.mode === 'note' ? s.folder : s.mode === 'append' ? s.appendPath : '';
-    const g = this.group('receiving', u.receiving, [t.modes[s.mode], where].filter(Boolean).join(' · '));
+    const g = this.group('receiving', u.receiving, [t.modes[s.mode], where].filter(Boolean).join(' · '), 'arrow-down-to-line');
     const modeRow = new Setting(g.body)
       .setName(u.writeAs)
       .addDropdown((d) => d.addOptions(t.modes).setValue(s.mode).onChange(async (v) => {
@@ -4430,10 +4869,19 @@ class DropitSettingTab extends PluginSettingTab {
     head.settingEl.addClass?.('dropit-ai', 'dropit-top');
     if (!rule || !rule.enabled) return;    // off: nothing more to show
 
-    const box = body.createDiv({ cls: 'dropit-sub' });
+    // The AI's own settings are one thing: a fold under the switch, and inside it a single light panel with a line down its side
+    const fold = body.createEl('details', { cls: 'dropit-ai-fold' });
+    fold.open = this.fold.aiSettings ?? false;
+    fold.addEventListener('toggle', () => { this.fold.aiSettings = fold.open; });
+    const foldHead = fold.createEl('summary', { cls: 'dropit-ai-fold-head' });
+    foldHead.createSpan({ cls: 'dropit-ai-fold-title', text: u.aiSettings });
+    const foldSum = foldHead.createSpan({ cls: 'dropit-ai-fold-sum' });
+    const box = fold.createDiv({ cls: 'dropit-ai-panel' });
     this.agentsBox = box;
     p.detect().then((found) => {
       if (this.agentsBox !== box) return;
+      const x = found.find((f) => f.id === rule.pick) ?? found.find((f) => f.id === rule.agent);
+      foldSum.setText(x?.label ?? a.agentCustom);
       this.agentRows(box, rule, found);
     }, () => {});
   }
@@ -4474,7 +4922,7 @@ class DropitSettingTab extends PluginSettingTab {
     const checkRow = (label) => {
       const row = checks?.createDiv?.({ cls: 'dropit-checks-row' });
       row?.createSpan?.({ cls: 'dropit-checks-label', text: label });
-      return row;
+      return row?.createDiv?.({ cls: 'dropit-checks-items' });      // the boxes wrap inside this, so a second line starts under the first box, not under the label
     };
     const kindsRow = checkRow(u.handleRows.kinds);
     let promptEl;
@@ -4513,6 +4961,8 @@ class DropitSettingTab extends PluginSettingTab {
         setTimeout(() => { if (rule.mode !== 'open') this.display(); }, 0);
       }, '', extras);
     }
+    // A custom command has no "don't limit the agent" box because it has no limits to lift: say so, quietly, so it doesn't look missing
+    if (rule.agent === 'custom') checks?.createDiv?.({ cls: 'dropit-checks-note', text: u.customNoLimits });
     const note = box.createDiv({ cls: 'dropit-hint', text: t.agents.needKinds });
     note.toggle(!rule.kinds.length);
 
@@ -4568,7 +5018,7 @@ class DropitSettingTab extends PluginSettingTab {
   devicesGroup() {
     const p = this.plugin;
     const u = t.set;
-    const g = this.group('devices', u.devices, '');
+    const g = this.group('devices', u.devices, '', 'monitor-smartphone');
     this.deviceGroup = g;
     const add = new Setting(g.body)
       .setName(t.addDevice)
@@ -4583,42 +5033,17 @@ class DropitSettingTab extends PluginSettingTab {
     hint.appendText(`${u.install} `);
     const link = hint.createEl('a', { text: u.installLink, href: INSTALL_URL });
     link.addEventListener('click', (e) => { e.preventDefault(); window.open(INSTALL_URL); });
-    // Last, in the warning colour: leaving the account asks first, because it cannot be undone from here
-    new Setting(g.body)
-      .setName(t.unpair)
-      .setDesc(t.unpairDesc)
-      .addButton((b) => b.setButtonText(t.unpairButton).setWarning().onClick(() => {
-        new Confirm(p.app, t.unpairAsk, t.unpairYes, () => this.run(() => p.unpair()), false, t.unpairTitle).open();
-      }));
   }
 
-  // ── Sending: who a send goes to by default ────────────────────────────
+  // ── Who a send goes to by default: part of the devices list ───────────
 
-  delivery() {
-    const p = this.plugin;
-    const u = t.set;
-    const g = this.group('delivery', u.delivery, targetsSummary(p.settings.targets, null));
-    this.deliveryGroup = g;
-    const head = new Setting(g.body).setName(u.defaultTo).setDesc(u.defaultToDesc);
-    this.selectAllEl = head.controlEl?.createEl?.('a', { text: u.selectAll, href: '#', cls: 'dropit-linkbtn' });
-    this.selectAllEl?.addEventListener?.('click', (e) => {
-      e.preventDefault();
-      this.setTargets([]);
-    });
-    this.selectAllEl?.toggle?.(false);
-    this.targetsEl = g.body.createDiv();
-    this.targetsWarn = g.body.createDiv({ cls: 'dropit-warn' });
-    this.targetBoxes = [];
-  }
-
-  /** One read of the device list serves both the sending rows and the devices list */
+  /** One read of the device list serves the whole group: the default, and the rows */
   async loadDevices() {
     const p = this.plugin;
     const devicesEl = this.devicesEl;
     let list = [];
     try { ({ devices: list } = await p.api('GET', '/v1/devices')); } catch (err) {
       this.devicesEl?.createDiv({ cls: 'setting-item-description', text: err.message });
-      this.targetsEl?.createDiv({ cls: 'setting-item-description', text: err.message });
       return;
     }
     if (this.devicesEl !== devicesEl) return;       // the page was drawn again meanwhile: that one reads the list itself
@@ -4628,36 +5053,22 @@ class DropitSettingTab extends PluginSettingTab {
     if (this.devicesEl === devicesEl) this.devices(list);
   }
 
-  /** The default, as rows: each other device that can receive gets a native checkbox, saved the moment it is ticked */
+  /**
+   * The saved default against the devices that are there now. Devices removed since last time come off it, with one Notice:
+   * they are never in the saved list again. With fewer than two devices that can receive there is nothing to choose, so
+   * the default goes back to "all" (a device that joins later is then included).
+   */
   async targets(list) {
     const p = this.plugin;
-    const u = t.set;
-    const el = this.targetsEl;
-    if (!el) return;
     const others = receivers(list, p.settings.device_id);
-    // Devices removed since last time come off the default now, with one Notice: they are never in the saved list again
     const { ids, gone } = reconcileTargets(p.settings.targets, others);
-    if (ids.join() !== cleanTargets(p.settings.targets).join()) {
-      p.settings.targets = ids;
+    const keep = others.length < 2 ? [] : ids;
+    if (keep.join() !== cleanTargets(p.settings.targets).join()) {
+      p.settings.targets = keep;
       await p.save();
-      if (gone) new Notice(t.targetsPruned(gone, !ids.length));
+      if (gone && others.length >= 2) new Notice(t.targetsPruned(gone, !keep.length));
     }
-    if (this.targetsEl !== el) return;
-    el.empty();
-    this.targetBoxes = [];
-    this.selectAllEl?.toggle?.(others.length > 0);
-    this.deliveryGroup?.setSummary(targetsSummary(p.settings.targets, others));
-    if (!others.length) return void el.createDiv({ cls: 'dropit-hint', text: u.noOthers });
     this.others = others;
-    for (const d of others) {
-      const row = new Setting(el).setName(d.name).setDesc(d.last_seen_at ? t.lastSeen(ago(d.last_seen_at)) : '');
-      const box = row.controlEl?.createEl?.('input', { type: 'checkbox', cls: 'dropit-check' });
-      if (!box) continue;
-      box.checked = ids.length ? ids.includes(d.device_id) : true;
-      box.setAttribute?.('aria-label', d.name);
-      box.addEventListener('change', () => { this.toggleTarget(d.device_id, box); });
-      this.targetBoxes.push({ id: d.device_id, box });
-    }
   }
 
   /** Tick or untick one device. The last one cannot be unticked: "send to all" is spelled by ticking every box */
@@ -4681,7 +5092,19 @@ class DropitSettingTab extends PluginSettingTab {
     await p.save();
     this.targetsWarn?.setText?.('');
     for (const { id, box } of this.targetBoxes ?? []) box.checked = !ids.length || ids.includes(id);
-    this.deliveryGroup?.setSummary(targetsSummary(ids, this.others ?? []));
+    this.showDefault();
+  }
+
+  /** The default as it stands, in the title line and in the group's folded line */
+  showDefault() {
+    const label = defaultLabel(this.plugin.settings.targets, this.others ?? []);
+    this.defaultValueEl?.setText?.(label);
+    this.deviceGroup?.setSummary(this.summaryLine(this.deviceList ?? [], label));
+  }
+
+  summaryLine(list, label) {
+    const line = t.set.deviceCount(list.length);
+    return (this.others?.length ?? 0) >= 2 ? `${line} · ${t.set.defaultIs(label)}` : line;
   }
 
   /** The code big, the QR next to it, a countdown, and a quiet check for the new device joining */
@@ -4694,7 +5117,7 @@ class DropitSettingTab extends PluginSettingTab {
       box.empty();
       box.toggle(true);
       box.createDiv({ cls: 'setting-item-description', text: t.slotNone });
-      this.upgradeLine(box, me);
+      await this.upgradeLine(box, me);
       return;
     }
     const [{ code, expires_at }, before] = await Promise.all([
@@ -4753,30 +5176,74 @@ class DropitSettingTab extends PluginSettingTab {
   }
 
   /** A quiet "or upgrade" link under the full-slots note: only when the account came with an upgrade link (free account, payments on) */
-  upgradeLine(parent, me) {
-    const url = upgradeLink(me);
+  async upgradeLine(parent, me) {
+    // Stopped by the number of devices: the link says so (the account's own link says `account`)
+    const url = upgradeLink(me, 'devices');
     if (!url) return;
+    const n = Number((await this.plugin.plansNow())?.limits?.paid?.devices);
     const line = parent.createDiv({ cls: 'setting-item-description' });
-    const a = line.createEl('a', { text: t.slotUpgrade, href: url });
+    const a = line.createEl('a', { text: n > 0 ? t.slotUpgradeN(n) : t.slotUpgrade, href: url });
     a.addEventListener('click', (e) => { e.preventDefault(); window.open(url); });
   }
 
+  /**
+   * One list. This computer first (no tick: it is where a send starts), then the others, each with a tick when it can receive
+   * and a Remove at the end; this computer's end button is Sign out, in the same column. Above the list, once at least two
+   * other devices can receive, the line that says where a send goes by default.
+   */
   devices(list) {
     const el = this.devicesEl;
     const p = this.plugin;
+    const u = t.set;
     if (!el) return;
     el.empty();
-    this.deviceGroup?.setSummary(t.set.deviceCount(list.length));
-    for (const d of list) {
-      const self = d.device_id === p.settings.device_id;
-      const bits = [self ? t.thisDevice : d.last_seen_at ? t.lastSeen(ago(d.last_seen_at)) : '', d.scope === 'ingest_only' ? t.scopeSendOnly : '']
-        .filter(Boolean);
-      const row = new Setting(el).setName(d.name).setDesc(bits.join(' · '));
-      if (!self) {
-        row.addButton((b) => b.setButtonText(t.remove).onClick(() => new Confirm(p.app, t.removeConfirm(d.name), t.removeYes, () => this.run(async () => {
-          await p.api('DELETE', `/v1/devices/${encodeURIComponent(d.device_id)}`);
-        })).open()));
+    this.targetBoxes = [];
+    this.defaultValueEl = null;
+    const others = this.others ?? receivers(list, p.settings.device_id);
+    this.others = others;
+    const choose = others.length >= 2;
+    this.deviceGroup?.setSummary(this.summaryLine(list, defaultLabel(p.settings.targets, others)));
+    window.setTimeout(() => this.tabOrder(), 0);       // the rows are drawn below
+    if (choose) {
+      const head = new Setting(el).setName(u.defaultHead).setDesc(u.defaultToDesc);
+      head.settingEl.addClass?.('dropit-default-head');
+      this.defaultValueEl = head.nameEl?.createSpan?.({ cls: 'dropit-default-value', text: defaultLabel(p.settings.targets, others) });
+      this.targetsWarn = el.createDiv({ cls: 'dropit-warn' });
+      el.createDiv({ cls: 'dropit-col-head', text: u.defaultCol });
+    }
+    const mine = (d) => d.device_id === p.settings.device_id;
+    for (const d of [...list.filter(mine), ...list.filter((x) => !mine(x))]) {
+      const self = mine(d);
+      const sendOnly = d.scope === 'ingest_only';
+      const row = new Setting(el).setName(d.name).setDesc(self || !d.last_seen_at ? '' : t.lastSeen(ago(d.last_seen_at)));
+      this.deviceMark(row, d, self);
+      // "This device" and "send only" are small outlined tags after the name, not words run into the description
+      if (self) row.nameEl?.createSpan?.({ cls: 'dropit-tag', text: t.thisDevice });
+      if (sendOnly) row.nameEl?.createSpan?.({ cls: 'dropit-tag', text: t.scopeSendOnly });
+      if (self) row.settingEl.addClass?.('is-self');
+      // The tick column: a box for a device that can receive, an empty cell for one that cannot (and for this computer: it has none)
+      if (choose && !self) {
+        const cell = row.controlEl?.createSpan?.({ cls: 'dropit-tick-cell' });
+        if (!sendOnly && !d.revoked_at) {
+          const box = cell?.createEl?.('input', { type: 'checkbox', cls: 'dropit-check' });
+          if (box) {
+            box.checked = p.settings.targets.length ? p.settings.targets.includes(d.device_id) : true;
+            box.setAttribute?.('aria-label', d.name);
+            box.addEventListener('change', () => { this.toggleTarget(d.device_id, box); });
+            this.targetBoxes.push({ id: d.device_id, box });
+          }
+        }
       }
+      row.addButton((b) => {
+        b.buttonEl?.addClass?.('dropit-end-button');
+        if (self) {
+          b.setButtonText(t.signOut).setWarning().onClick(() => new Confirm(p.app, t.signOutAsk, t.signOut, () => this.run(() => p.unpair()), false, t.signOutTitle).open());
+        } else {
+          b.setButtonText(t.remove).setWarning().onClick(() => new Confirm(p.app, t.removeConfirm(d.name), t.removeYes, () => this.run(async () => {
+            await p.api('DELETE', `/v1/devices/${encodeURIComponent(d.device_id)}`);
+          })).open());
+        }
+      });
     }
   }
 
@@ -4784,40 +5251,98 @@ class DropitSettingTab extends PluginSettingTab {
 
   advanced() {
     const p = this.plugin;
-    const g = this.group('advanced', t.set.advanced, '');
+    const g = this.group('advanced', t.set.advanced, '', 'settings');
     this.tip(new Setting(g.body)
       .setName(t.serverAddress)
       .addText((x) => x.setPlaceholder(DEFAULT_ENDPOINT).setValue(p.base()).onChange(async (v) => {
         const value = v.trim().replace(/\/+$/, '');
-        p.settings.endpoints = value ? [value] : [DEFAULT_ENDPOINT];
+        const own = !!value && value !== DEFAULT_ENDPOINT;
+        p.settings.endpoints = own ? [value] : [DEFAULT_ENDPOINT];
+        p.settings.ownEndpoint = own;
         await p.save();
       })), t.serverAddressDesc);
   }
 
+  /**
+   * Pull again: two sliders and a button. How many (1–50, 10 to start) and how far back (1 day to what Paid keeps, 1 to start).
+   * A free account sees the whole track but cannot move off 1 day: trying to says why, in a line under the row, with the way to Paid.
+   */
   pullAgain(body) {
     const p = this.plugin;
-    let mode = 'all';
-    // Each mode keeps its own number: 20 items and 7 days are different questions, and switching back
-    // and forth keeps what was typed for each
-    const counts = { last: '20', days: '7' };
-    let number;
-    const row = new Setting(body)
-      .setName(t.repull)
-      .addDropdown((d) => d.addOptions({ all: t.repullAll, last: t.repullLast, days: t.repullDays }).onChange((v) => {
-        mode = v;
-        number.inputEl.toggle(v !== 'all');
-        if (v in counts) number.setValue(counts[v]);
-      }))
-      .addText((x) => {
-        number = x;
-        x.inputEl.type = 'number';
-        x.inputEl.min = '1';
-        x.inputEl.addClass('dropit-number');
-        x.inputEl.toggle(false);
-        x.onChange((v) => { if (mode in counts) counts[mode] = v; });
-      })
-      .addButton((b) => b.setButtonText(t.repullGo).onClick(() => this.run(() => p.repull(mode, Number(counts[mode])))));
-    this.tip(row, t.repullDesc(p.settings.cursor));
+    let count = REPULL_DEFAULT_ITEMS;
+    let days = REPULL_DEFAULT_DAYS;
+    let reach = repullDays(p.meCache?.m, p.plansCache?.plans);
+    let daysSlider;
+    let hideTimer;
+    // One row: its name, then the two sliders side by side (each with its own words above it, changing as it moves), then the button
+    const row = new Setting(body).setName(t.repull);
+    row.settingEl?.addClass?.('dropit-repull-row');
+    const cell = (cls) => row.controlEl?.createDiv?.({ cls: `dropit-slider-cell ${cls}` });
+    const slider = (box, label, build) => {
+      const words = box?.createSpan?.({ cls: 'dropit-slider-label' });
+      row.addSlider((s) => {
+        build(s);
+        s.sliderEl?.setAttribute?.('aria-label', label);
+        if (box && s.sliderEl) box.append?.(s.sliderEl);         // addSlider puts it at the end of the row's controls: it goes into its own cell
+      });
+      return words;
+    };
+    const countCell = cell('dropit-count-cell');
+    const daysCell = cell('dropit-days-cell');
+    const countWords = slider(countCell, t.repullCountLabel, (s) => { s.setLimits(REPULL_MIN_ITEMS, REPULL_MAX_ITEMS, 1).setValue(count).setDynamicTooltip().onChange((v) => { count = v; live(); }); });
+    const daysWords = slider(daysCell, t.repullDaysLabel, (s) => { daysSlider = s; s.setLimits(1, reach.track, 1).setValue(days).setDynamicTooltip().onChange((v) => change(v)); });
+    row.addButton((b) => b.setButtonText(t.repullGo).onClick(() => this.run(() => p.repull('recent', count, days))));
+    // The line for a free account goes under the whole row, not between the sliders
+    const hint = body.createDiv({ cls: 'setting-item-description dropit-repull-hint' });
+    hint.toggle?.(false);
+    const live = () => {
+      countWords?.setText?.(t.repullCount(count));
+      daysWords?.setText?.(t.repullWithin(days));
+    };
+    let shown = false;
+    let quietUntil = 0;
+    const hideHint = () => { shown = false; window.clearTimeout(hideTimer); hint.toggle?.(false); };
+    // Free: the slider goes back to 1 day at once, and the line says why. Paid: kept to the days the account keeps items
+    const change = (v) => {
+      const locked = reach.allowed <= 1;
+      days = Math.min(v, reach.allowed);
+      if (days !== v) daysSlider?.setValue?.(days);
+      live();
+      if (!locked) return hideHint();
+      showHint();
+    };
+    const showHint = () => {
+      if (Date.now() < quietUntil) return;
+      const h = repullHint(p.meCache?.m, p.plansCache?.plans);
+      hint.empty?.();
+      hint.createSpan?.({ text: h.text });
+      if (h.link) {
+        const a = hint.createEl?.('a', { text: h.link, href: '#', cls: 'dropit-repull-link' });
+        a?.addEventListener?.('click', (e) => { e.preventDefault(); e.stopPropagation(); p.openPlans({ why: 'kept' }); });
+      }
+      shown = true;
+      hint.toggle?.(true);
+      window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(hideHint, REPULL_HINT_MS);
+    };
+    hint.addEventListener?.('click', hideHint);                           // a second tap puts it away
+    // …and so does a second touch of the slider's row while it is up, or Esc
+    daysCell?.addEventListener?.('pointerdown', () => { if (shown) { hideHint(); quietUntil = Date.now() + 400; } });      // the slider's own change that follows does not bring it back
+    row.settingEl?.addEventListener?.('keydown', (e) => { if (e.key === 'Escape' && shown) { e.stopPropagation(); hideHint(); } });
+    // The track and the reach are known once the account and the plans are read: drawn again then
+    const draw = () => {
+      reach = repullDays(p.meCache?.m, p.plansCache?.plans);
+      days = Math.min(days, reach.allowed);
+      daysSlider?.setLimits?.(1, reach.track, 1);
+      daysSlider?.setValue?.(days);
+      row.settingEl?.toggleClass?.('is-locked', reach.allowed <= 1);
+      daysSlider?.sliderEl?.setAttribute?.('aria-disabled', reach.allowed <= 1 ? 'true' : 'false');
+      live();
+    };
+    draw();
+    this.redrawRepull = draw;                          // the account line's read calls it
+    if (!p.plansCache) p.plansNow().then(draw, () => {});
+    this.tip(row, `${t.repullDesc2} ${t.repullDesc(p.settings.cursor)}`);
   }
 
   /** The AI's numbers: one row, each a short label, a small field and its unit. Empty uses the default. */
@@ -5049,7 +5574,7 @@ class RulePicker extends FuzzySuggestModal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { pool, byteGate, batchDocument, errorText, apiError, errorNotice, linkNotice, safeLink, upgradeLink, trialDaysOf, trialFacts, paidEndingIn, solvePow, powChallengeOk, dkhOf, deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl, cleanTargets, receivers, reconcileTargets, targetsSummary, slotPlan, Confirm });
+Object.assign(module.exports, { pool, byteGate, batchDocument, errorText, apiError, errorNotice, linkNotice, safeLink, upgradeLink, withWhy, planLink, planPrices, momentFacts, money, trialDaysOf, trialFacts, paidEndingIn, solvePow, powChallengeOk, dkhOf, deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl, cleanTargets, receivers, reconcileTargets, defaultLabel, sameAccountMark, repullDays, repullRange, repullHint, slotPlan, Confirm });
 Object.assign(module.exports, {
   // the runner block
   RUNNER_VERSION, RUN_DEFAULTS, RUN_KINDS, RUN_AGENTS, agentEnv, safeFileName, linkHost, planRun, composeInput, sanitizeAnswer, detectAgents, runHandler,
