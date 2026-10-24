@@ -1,4 +1,4 @@
-# dropit for Obsidian
+# dropit (sync and send anything to phone and PC)
 
 **English** · [简体中文](./README.zh-CN.md)
 
