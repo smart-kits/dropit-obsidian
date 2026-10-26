@@ -689,6 +689,7 @@ const STRINGS = {
     slotUpgradeN: (n) => `Or go Paid — up to ${n} devices`,
     deviceJoined: 'dropit: a new device joined',
     thisDevice: 'this device',
+    accountShort: 'Account',
     lastSeen: (when) => `last seen ${when}`,
     scopeSendOnly: 'send only',
     remove: 'Remove',
@@ -1046,6 +1047,7 @@ const STRINGS = {
     slotUpgradeN: (n) => `或升级后最多 ${n} 台设备`,
     deviceJoined: 'dropit：新设备已加入',
     thisDevice: '本机',
+    accountShort: '账号',
     lastSeen: (when) => `${when}在线`,
     scopeSendOnly: '只能投递',
     remove: '移除',
@@ -3623,6 +3625,23 @@ function sameAccountMark(value, tag) {
   return /^0[0-7]+$/.test(tag) && parseInt(tag, 8) === value;        // a leading 0 made some of them octal
 }
 
+/** The last 4 characters of a device id without its `d_`: tells two devices of the same name apart; '' when there is nothing to show */
+function deviceSuffix(id) {
+  const s = typeof id === 'string' ? id.replace(/^d_/, '') : '';
+  return s.length >= 4 ? s.slice(-4) : '';
+}
+
+/** A device row's second line: the id suffix first, then the description (last seen), joined by a dot; either may be missing */
+function deviceDesc(suffix, desc) {
+  return [suffix, desc].filter(Boolean).join(' · ');
+}
+
+/** The short account code to show: the one the plugin already writes into its notes, else the one the account gives; '' shows nothing */
+function accountCode(settings, me) {
+  const ok = (v) => (typeof v === 'string' && /^[0-9a-f]{4,64}$/i.test(v) ? v : '');
+  return ok(settings?.accountTag) || ok(me?.account_tag);
+}
+
 const yamlValue = (v) => (/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(String(v)) ? String(v) : JSON.stringify(String(v)));
 
 /** A new note's front matter, written with the note: the same keys a later item adds to with processFrontMatter */
@@ -5222,11 +5241,17 @@ class DropitSettingTab extends PluginSettingTab {
       this.targetsWarn = el.createDiv({ cls: 'dropit-warn' });
       el.createDiv({ cls: 'dropit-col-head', text: u.defaultCol });
     }
+    const code = accountCode(p.settings, p.meCache?.m);
+    if (code) {
+      const line = el.createDiv({ cls: 'dropit-account' });
+      line.createSpan({ text: `${u.account} ` });
+      line.createSpan({ cls: 'dropit-account-code', text: code });
+    }
     const mine = (d) => d.device_id === p.settings.device_id;
     for (const d of [...list.filter(mine), ...list.filter((x) => !mine(x))]) {
       const self = mine(d);
       const sendOnly = d.scope === 'ingest_only';
-      const row = new Setting(el).setName(d.name).setDesc(self || !d.last_seen_at ? '' : t.lastSeen(ago(d.last_seen_at)));
+      const row = new Setting(el).setName(d.name).setDesc(deviceDesc(deviceSuffix(d.device_id), self || !d.last_seen_at ? '' : t.lastSeen(ago(d.last_seen_at))));
       this.deviceMark(row, d, self);
       // "This device" and "send only" are small outlined tags after the name, not words run into the description
       if (self) row.nameEl?.createSpan?.({ cls: 'dropit-tag', text: t.thisDevice });
@@ -5585,7 +5610,7 @@ class RulePicker extends FuzzySuggestModal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { BATCH_QUIET_MS, BATCH_MAX_MS, BATCH_KEEP_MS, pool, byteGate, batchDocument, errorText, apiError, errorNotice, linkNotice, safeLink, upgradeLink, withWhy, planLink, planPrices, momentFacts, money, trialDaysOf, trialFacts, paidEndingIn, solvePow, powChallengeOk, dkhOf, deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl, cleanTargets, receivers, reconcileTargets, defaultLabel, sameAccountMark, repullDays, repullRange, repullHint, slotPlan, Confirm });
+Object.assign(module.exports, { BATCH_QUIET_MS, BATCH_MAX_MS, BATCH_KEEP_MS, pool, byteGate, batchDocument, errorText, apiError, errorNotice, linkNotice, safeLink, upgradeLink, withWhy, planLink, planPrices, momentFacts, money, trialDaysOf, trialFacts, paidEndingIn, solvePow, powChallengeOk, dkhOf, deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl, cleanTargets, receivers, reconcileTargets, defaultLabel, sameAccountMark, deviceSuffix, deviceDesc, accountCode, repullDays, repullRange, repullHint, slotPlan, Confirm });
 Object.assign(module.exports, {
   // the runner block
   RUNNER_VERSION, RUN_DEFAULTS, RUN_KINDS, RUN_AGENTS, agentEnv, safeFileName, linkHost, planRun, composeInput, sanitizeAnswer, detectAgents, runHandler,

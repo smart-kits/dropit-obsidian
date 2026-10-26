@@ -43,6 +43,8 @@ The plugin is one device of one account; the other devices are other dropit clie
 the QR code with its camera (on an iPhone it opens the shortcut's setup with the code filled in). The first device creates the account;
 every other one joins with a code like this. When every device slot is in use, the code comes with a line saying which device the new one will replace (the one idle longest; *Replace a different one* picks another), and with no device to replace it shows no code and points to the device list to remove one first.
 
+The device list shows a short account code (select it to copy) and, on each device's second line before its last-seen time, the last 4 characters of its id (like `bT5Q`), so two devices with the same name can be told apart; the same code is written to each note as `dropit_account`, and it is not a credential.
+
 **A good setup:** send from your phone with the shortcut (iPhone) or the app (Android), from the browser with the extension; receive everything here as notes.
 To read what you sent from this computer on your phone, put the plugin on Obsidian mobile too, or open the web inbox.
 

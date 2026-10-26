@@ -829,6 +829,26 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       && new Set(calls.map((c) => JSON.parse(c.body).meta.group.id)).size === 1, `${calls.length} · ${notices.at(-1)}`);
   }
 
+  console.log('── Device suffix and account code ──');
+  {
+    const { deviceSuffix, deviceDesc, accountCode, STRINGS } = DropitPlugin;
+    ok('suffix: last 4 of the id without d_', deviceSuffix('d_QMNWEuCelwDcAB7hmUbT5Q') === 'bT5Q', deviceSuffix('d_QMNWEuCelwDcAB7hmUbT5Q'));
+    ok('suffix: an id without d_ keeps its own last 4', deviceSuffix('abcdefgh') === 'efgh');
+    ok('suffix: exactly 4 after d_ is shown whole', deviceSuffix('d_abcd') === 'abcd');
+    ok('suffix: too short (d_ab, d1, empty) shows nothing', deviceSuffix('d_ab') === '' && deviceSuffix('d1') === '' && deviceSuffix('') === '');
+    ok('suffix: missing or not a string shows nothing', deviceSuffix(undefined) === '' && deviceSuffix(null) === '' && deviceSuffix(42) === '');
+    ok('second line: suffix first, then the description, joined by a dot', deviceDesc('bT5Q', 'last seen 2 min ago') === 'bT5Q · last seen 2 min ago');
+    ok('second line: only the suffix', deviceDesc('bT5Q', '') === 'bT5Q');
+    ok('second line: only the description', deviceDesc('', 'last seen 2 min ago') === 'last seen 2 min ago');
+    ok('second line: suffix unavailable and no description is empty', deviceDesc('', '') === '' && deviceDesc(deviceSuffix('d1'), '') === '');
+    ok('account: the plugin\'s own tag wins, and a different one from the account is no error', accountCode({ accountTag: 'a1b2c3d4' }, { account_tag: 'ffffffff' }) === 'a1b2c3d4');
+    ok('account: no own tag yet, the account\'s is used', accountCode({ accountTag: '' }, { account_tag: 'ffffffff' }) === 'ffffffff');
+    ok('account: both equal', accountCode({ accountTag: 'a1b2c3d4' }, { account_tag: 'a1b2c3d4' }) === 'a1b2c3d4');
+    ok('account: neither given shows nothing', accountCode({}, {}) === '' && accountCode(undefined, undefined) === '' && accountCode({ accountTag: '' }, null) === '');
+    ok('account: junk values show nothing', accountCode({ accountTag: 12345678 }, { account_tag: 'not hex!' }) === '');
+    ok('account label in both languages', STRINGS.en.accountShort === 'Account' && STRINGS.zh.accountShort === '账号');
+  }
+
   console.log('── Settings page ──');
   for (const mode of ['note', 'append', 'daily']) {
     const { p } = await makePlugin({ mode });
