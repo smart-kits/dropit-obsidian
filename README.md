@@ -7,9 +7,9 @@ titled, images embedded, sources linked. And anything in your vault goes out wit
 
 Desktop and mobile. Part of [dropit](https://github.com/smart-kits/dropit-client), a private pipe between your own devices.
 
-![A photo shared on the phone, a page and a paragraph from the browser, a line with three screenshots, today's daily note, catching up after Obsidian was closed, and files sent from the vault.](./media/obsidian-tour.webp)
+![A photo shared on the phone; a video link, a clip, a voice note and a PDF; a line with three screenshots and copied text; a paragraph and a page from the browser; a note, files and a passage sent from Obsidian to the phone; catching up after Obsidian was closed; and the setting that hands each item to your own command.](./media/obsidian-tour.webp)
 
-<sub>Shown: Lonely Planet pages · a NASA photograph (public domain).</sub>
+<sub>Shown: the arXiv page of <i>Attention Is All You Need</i> (Vaswani et al., arXiv:1706.03762) · a NASA photograph (NASA/Anil Menon). Other pages and files are made for the demo.</sub>
 
 ## What it's like
 

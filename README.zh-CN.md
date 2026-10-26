@@ -7,9 +7,9 @@
 
 桌面端和移动端都能用。它是 [dropit](https://github.com/smart-kits/dropit-client) 的一部分：一条只连着你自己设备的私人管道。
 
-![手机分享的照片、浏览器发来的页面和段落、一句话加三张截图、写进今天的日记、Obsidian 关着时发的东西重开后补齐、从 vault 发出文件。](./media/obsidian-tour.webp)
+![手机分享的照片；视频链接、视频、语音和 PDF；一句话加三张截图和复制的文字；浏览器里的段落和页面；从 Obsidian 发到手机的笔记、文件和选中的文字；Obsidian 关着时发的东西重开后补齐；以及把每条内容交给你自己命令的那个设置。](./media/obsidian-tour.webp)
 
-<sub>画面内容：Lonely Planet 页面 · NASA 照片（公共领域）。</sub>
+<sub>画面内容：《Attention Is All You Need》的 arXiv 页面（Vaswani 等，arXiv:1706.03762）· NASA 照片（NASA/Anil Menon）。其余页面和文件是为演示自制的。</sub>
 
 ## 用起来是什么感觉
 
