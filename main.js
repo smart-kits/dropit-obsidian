@@ -483,9 +483,9 @@ const FOCUS_SYNC_MS = 10_000;     // at most one catch-up sync per 10 s of windo
 const HOOK_GAP_MS = 1_000;        // between two runs of the user's command
 const DAY_MS = 86_400_000;
 const MAX_FILE_BYTES = 100 << 20; // the most one file can be under any plan: a bigger one is refused here, unread
-const BATCH_KEEP_MS = 86_400_000; // a batch's later items arrive within seconds; a day is plenty
-const BATCH_QUIET_MS = 90_000;    // a batch still short of its count is handled with what it has this long after its last item arrived…
-const BATCH_MAX_MS = 300_000;     // …and at the latest this long after its first
+const BATCH_KEEP_MS = 86_400_000; // well past the longest a batch waits (BATCH_MAX_MS), so a record never goes while it is still needed
+const BATCH_QUIET_MS = 960_000;   // a batch still short of its count is handled with what it has this long after its last item arrived (16 min: a big file is slow to come)…
+const BATCH_MAX_MS = 1_800_000;   // …and at the latest this long after its first (30 min)
 const SEND_CONCURRENCY = 3;       // files on their way at the same time when sending several
 const FETCH_AHEAD = 3;            // files downloaded ahead while a page of items is written, in order…
 const FETCH_AHEAD_BYTES = 48 << 20; // …as long as the ones waiting hold no more than this much (the one needed now is always fetched)
@@ -1591,9 +1591,20 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       if (where) return item.url ? this.retryMissing(item, where, ctx) : null;
     }
     const group = groupOf(item);
-    let dest = group ? (ownValue(this.settings.batches, group.id) ?? (ctx.index?.batches.has(group.id)
-      ? { path: ctx.index.batches.get(group.id), kind: 'note' } : null)) : null;
-    if (dest && !this.app.vault.getFileByPath(dest.path)) dest = null;
+    const known = group ? ownValue(this.settings.batches, group.id) : undefined;
+    let dest = known && this.app.vault.getFileByPath(known.path) ? known : null;
+    // The batch's note was renamed or moved (by hand or by another plugin) — or this device has no record of it: the note
+    // still says which batch it is (`dropit_batch`), so look for it there. Only now is the index built (it walks the vault's
+    // metadata), never for an item whose note is where it was left. A batch that went into one shared note (append / daily)
+    // has no such mark in the note, so there is nothing to find: it starts again where it would start.
+    if (group && !dest && (!known || known.kind === 'note')) {
+      const path = (ctx.index ??= this.buildIndex()).batches.get(group.id);
+      if (path && this.app.vault.getFileByPath(path)) {
+        dest = { ...known, path, kind: 'note' };
+        const run = ownValue(this.settings.batchRuns, group.id);
+        if (run?.note) run.note = path;       // a batch waiting to be handled follows its note
+      }
+    }
 
     const starts = !dest;
     const earlier = dest?.parts ?? [];
@@ -1628,7 +1639,7 @@ const DropitPlugin = class DropitPlugin extends Plugin {
       if (this.settings.accountTag && fm.dropit_account != null && !sameAccountMark(fm.dropit_account, this.settings.accountTag)) continue;
       for (const s of listOf(fm.dropit_seq)) written.set(Number(s), file.path);
       for (const s of listOf(fm.dropit_missing)) missing.set(Number(s), file.path);
-      if (fm.dropit_batch) batches.set(String(fm.dropit_batch), file.path);
+      if (fm.dropit_batch && !batches.has(String(fm.dropit_batch))) batches.set(String(fm.dropit_batch), file.path);   // two notes with one batch: the first found
     }
     for (const [seq, at] of Object.entries(this.settings.missingAt)) missing.set(Number(seq), at.path);
     for (const s of written.keys()) missing.delete(s);   // a later success wins
@@ -5574,7 +5585,7 @@ class RulePicker extends FuzzySuggestModal {
 
 module.exports = DropitPlugin;
 // for tests
-Object.assign(module.exports, { pool, byteGate, batchDocument, errorText, apiError, errorNotice, linkNotice, safeLink, upgradeLink, withWhy, planLink, planPrices, momentFacts, money, trialDaysOf, trialFacts, paidEndingIn, solvePow, powChallengeOk, dkhOf, deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl, cleanTargets, receivers, reconcileTargets, defaultLabel, sameAccountMark, repullDays, repullRange, repullHint, slotPlan, Confirm });
+Object.assign(module.exports, { BATCH_QUIET_MS, BATCH_MAX_MS, BATCH_KEEP_MS, pool, byteGate, batchDocument, errorText, apiError, errorNotice, linkNotice, safeLink, upgradeLink, withWhy, planLink, planPrices, momentFacts, money, trialDaysOf, trialFacts, paidEndingIn, solvePow, powChallengeOk, dkhOf, deviceKeyOf, localIdOf, vaultStorage, STRINGS, QR, noteTitle, sanitize, frontMatter, yamlValue, renderText, sourceLine, withSource, payloadOf, joinBlock, addSeq, coreTemplate, inRanges, addToRanges, issueUrl, cleanTargets, receivers, reconcileTargets, defaultLabel, sameAccountMark, repullDays, repullRange, repullHint, slotPlan, Confirm });
 Object.assign(module.exports, {
   // the runner block
   RUNNER_VERSION, RUN_DEFAULTS, RUN_KINDS, RUN_AGENTS, agentEnv, safeFileName, linkHost, planRun, composeInput, sanitizeAnswer, detectAgents, runHandler,

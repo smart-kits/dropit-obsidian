@@ -262,6 +262,67 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       && fm.get(notes[0]).dropit_batch === 'bAAAAAAAA' && fm.get(notes[0]).kind === 'batch', JSON.stringify(fm.get(notes[0])));
   }
 
+  console.log('── A batch whose note was renamed or moved still gets its later items ──');
+  {
+    const g = (i, id = 'bRENAME01') => ({ group: { id, i, n: 3 } });
+    const move = (made, from, to) => {            // what Obsidian's rename does to the vault and its metadata
+      made.files.set(to, made.files.get(from)); made.files.delete(from);
+      made.fm.set(to, made.fm.get(from)); made.fm.delete(from);
+    };
+    const mdIn = (files) => [...files.keys()].filter((k) => k.endsWith('.md'));
+    {
+      const made = await makePlugin();
+      const { p, files, fm } = made;
+      serve({ 'GET /v1/pull': pages([text(40, 'first words', { meta: g(1) })], [blob(41, 'a.png', { meta: { filename: 'a.png', ...g(2) } }), blob(42, 'b.png', { meta: { filename: 'b.png', ...g(3) } })]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await p.sync(false);
+      const old = mdIn(files)[0];
+      move(made, old, 'Projects/renamed by someone.md');
+      await p.sync(false);
+      const notes = mdIn(files);
+      ok('renamed before the rest came: they join it, no second note', notes.length === 1 && notes[0] === 'Projects/renamed by someone.md', notes.join());
+      ok('…both files embedded in it', files.get(notes[0]).includes('![[a.png]]') && files.get(notes[0]).includes('![[b.png]]'), files.get(notes[0]));
+      ok('…its front matter lists all three', JSON.stringify(fm.get(notes[0]).dropit_seq) === '[40,41,42]', JSON.stringify(fm.get(notes[0])));
+      ok('…and the record of the batch now has the new path', p.settings.batches['bRENAME01'].path === 'Projects/renamed by someone.md', JSON.stringify(p.settings.batches));
+    }
+    {
+      // two notes carry the same batch mark: the first found is used, nothing fails
+      const made = await makePlugin();
+      const { p, files, fm } = made;
+      serve({ 'GET /v1/pull': pages([text(50, 'x', { meta: g(1) })], [blob(51, 'a.png', { meta: { filename: 'a.png', ...g(2) } })]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await p.sync(false);
+      const old = mdIn(files)[0];
+      files.set('copy.md', files.get(old)); fm.set('copy.md', { ...fm.get(old) });
+      move(made, old, 'zz moved.md');
+      await p.sync(false);
+      ok('two notes with the same batch mark: it joins one of them, no third note', mdIn(files).length === 2 && [...mdIn(files)].filter((k) => files.get(k).includes('![[a.png]]')).length === 1, mdIn(files).join());
+    }
+    {
+      // the note is gone altogether: as before, the item starts a note of its own, no error
+      const made = await makePlugin();
+      const { p, files, fm } = made;
+      serve({ 'GET /v1/pull': pages([text(60, 'only words', { meta: g(1) })], [blob(61, 'a.png', { meta: { filename: 'a.png', ...g(2) } })]), 'GET /': () => ({ bytes: PNG_BYTES() }) });
+      await p.sync(false);
+      const old = mdIn(files)[0];
+      files.delete(old); fm.delete(old);
+      await p.sync(false);
+      ok('the note was deleted: the later item starts a note of its own, nothing throws', mdIn(files).length === 1 && files.get(mdIn(files)[0]).includes('![[a.png]]') && !notices.at(-1)?.toLowerCase().includes('fail'), mdIn(files).join() + ' · ' + notices.at(-1));
+    }
+    {
+      // append mode: the shared note is renamed; there is no batch mark inside it, so the item starts where it would (a new appended note), as before
+      const made = await makePlugin({ mode: 'append', appendFile: 'Dropit.md' });
+      const { p, files } = made;
+      serve({ 'GET /v1/pull': pages([text(70, 'in the shared note', { meta: g(1) })], [text(71, 'later one', { meta: g(2) })]) });
+      await p.sync(false);
+      const shared = mdIn(files);
+      ok('append mode: the first item went into the shared note', shared.length === 1 && files.get(shared[0]).includes('in the shared note'), shared.join());
+      const before = p.settings.batches['bRENAME01']?.kind;
+      move(made, shared[0], 'Elsewhere/renamed.md');
+      let threw = false;
+      try { await p.sync(false); } catch { threw = true; }
+      ok('append mode, shared note renamed: nothing throws, and the later item is still written somewhere', !threw && [...files.values()].some((v) => typeof v === 'string' && v.includes('later one')), JSON.stringify([before, mdIn(files)]));
+    }
+  }
+
   console.log('── A file on its own ──');
   {
     const { p, files } = await makePlugin();
@@ -2314,8 +2375,8 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
     {
       const { p, files, fm } = await setup([[bt(500, 'compare these MODE:stdin', 1, 4), bi(501, 'a.png', 2, 4)], [bi(502, 'b.png', 3, 4), bi(503, 'c.png', 4, 4)]]);
       await pull(p);
-      ok('half a batch: nothing has run, it is waiting, and its clock is set for 90 s', started(p).length === 0 && resultsIn(files).length === 0
-        && p.settings.batchRuns[ID]?.state === 'wait' && p.settings.batchRuns[ID].seen.length === 2 && live().length === 1 && live()[0].ms === 90_000, JSON.stringify([p.settings.batchRuns, held.map((h) => h.ms)]));
+      ok('half a batch: nothing has run, it is waiting, and its clock is set for the quiet time', started(p).length === 0 && resultsIn(files).length === 0
+        && p.settings.batchRuns[ID]?.state === 'wait' && p.settings.batchRuns[ID].seen.length === 2 && live().length === 1 && live()[0].ms === DropitPlugin.BATCH_QUIET_MS, JSON.stringify([p.settings.batchRuns, held.map((h) => h.ms)]));
       await pull(p);
       const notes = notesIn(files);
       ok('the rest arrives: it runs at once (the clock was not needed), once, and the clock is gone', started(p).length === 1 && live().length === 0 && p.settings.batchRuns[ID].state === 'done', JSON.stringify([p.runs, p.settings.batchRuns]));
@@ -2351,6 +2412,37 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       ok('the fourth comes late: it joins the note, is not run, and the run record says so', started(p).length === 1 && after.includes('![[c.png]]') && after.startsWith(answered.slice(0, 40))
         && p.runs.some((r) => r.why === 'skipped:late') && resultsIn(files).length === 0, JSON.stringify([p.runs, after]));
       ok('…and what was answered is still there, not written over', after.includes('items="3"') && after.includes('SUMMARY') === answered.includes('SUMMARY'));
+    }
+
+    // ── a slow file: the wait is the long one, and an item that is slow but not too slow is still counted ──
+    hold();
+    {
+      ok('the waits: 16 minutes quiet, 30 at most, and the record is kept longer than the longest wait', DropitPlugin.BATCH_QUIET_MS === 16 * 60_000 && DropitPlugin.BATCH_MAX_MS === 30 * 60_000 && DropitPlugin.BATCH_KEEP_MS > DropitPlugin.BATCH_MAX_MS);
+      const { p, files } = await setup([[bt(550, 'slow video coming MODE:stdin', 1, 3), bi(551, 'a.png', 2, 3)], [bi(552, 'v.png', 3, 3)]]);
+      await pull(p);
+      const real = Date.now;
+      const t0 = real();
+      try {
+        Date.now = () => t0 + DropitPlugin.BATCH_QUIET_MS - 60_000;     // just inside the quiet time
+        ok('nothing has run while it waits (the clock has not rung)', started(p).length === 0 && live().length === 1 && p.settings.batchRuns[ID].state === 'wait');
+        await pull(p);
+      } finally { Date.now = real; }
+      ok('the slow third item arrives inside the wait: it is counted and the batch runs at once with all three', started(p).length === 1 && live().length === 0 && files.get(notesIn(files)[0]).includes('items="3"') && files.get(notesIn(files)[0]).includes('file ./v.png'), JSON.stringify(p.runs));
+    }
+    hold();
+    {
+      // the wait never goes past the longest: with the first item long ago, the clock is the time that is left
+      const { p } = await setup([[bt(560, 'late MODE:stdin', 1, 4), bi(561, 'a.png', 2, 4)], [bi(562, 'b.png', 3, 4)]]);
+      await pull(p);
+      p.settings.batchRuns[ID].first -= DropitPlugin.BATCH_MAX_MS - 5_000;
+      await pull(p);
+      ok('another item near the end of the longest wait: the clock is what is left of it, not the full quiet time', live().length === 1 && live()[0].ms <= 5_000 && live()[0].ms >= 0, JSON.stringify(held.map((h) => h.ms)));
+      // after a restart the wait starts again, with the same long time
+      const stored = JSON.parse(JSON.stringify(p.stored));
+      hold();
+      const again = await makePlugin(undefined, stored);
+      again.p.batchResume();
+      ok('after a restart it waits again for the quiet time, from the start', live().length === 1 && live()[0].ms === DropitPlugin.BATCH_QUIET_MS, JSON.stringify(held.map((h) => h.ms)));
     }
 
     // ── a batch whose items were sent in another order than they arrive: handed over as it was sent ──
@@ -2547,7 +2639,7 @@ const PNG_BYTES = () => Uint8Array.from(PNG).buffer;   // its own ArrayBuffer: a
       link(again);
       again.p.batchResume();
       await settle();
-      ok('after a restart it waits again, in full, and has not run', started(again.p).length === 0 && live().length === 1 && live()[0].ms === 90_000, JSON.stringify(held));
+      ok('after a restart it waits again, in full, and has not run', started(again.p).length === 0 && live().length === 1 && live()[0].ms === DropitPlugin.BATCH_QUIET_MS, JSON.stringify(held));
       // Text that came in the batch links to a file of the vault: the restart hands over what was saved for the batch, not that
       const notePath = notesIn(again.files)[0];
       again.files.set('Private/secret.md', 'SECRET OF THE VAULT');

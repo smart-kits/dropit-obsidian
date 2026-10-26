@@ -168,6 +168,7 @@ Inbox/10-16 14.02 Thursday meeting.md          ← the same note, once it was pr
   as it was and writes the result as a note beside it, `<original name> · <rule name>`. A received **file** is always kept, with
   the result in a note beside it. A note that holds several items (an appended note, today's daily note, a batch) is never
   replaced; its items get a note each, with the item's number in the name.
+- **Items sent together are handled together.** When you send several things at once, the agent runs once on all of them, as soon as they have all arrived. If one is slow (a large video, say), it waits for it for up to about 30 minutes; after that it runs with what has arrived, and an item that comes in later is kept in the note but not handled.
 - **By hand:** *dropit: Process this note with…* runs the rule on the open note (it works while the rule is off); the result is
   always a note beside it and the note is never changed. *dropit: Re-run the last handler* runs it again.
 - **Try it, and see what runs:** The small *Try it* button beside the AI switch really runs it on the latest item, after asking. The *Show…* button on the command row shows, for an
